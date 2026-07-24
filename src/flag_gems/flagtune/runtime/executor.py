@@ -379,9 +379,7 @@ class BenchmarkWorker:
         import triton
 
         import flag_gems
-        from flag_gems.flagtune.runtime.device import (
-            probe_flagtune_environment,
-        )
+        from flag_gems.flagtune.runtime.device import probe_flagtune_environment
 
         self.spec = load_operator_benchmark_spec(config_path)
         if device_runtime is None:
@@ -642,15 +640,10 @@ class BenchmarkWorker:
                 quantiles=(0.5, 0.2, 0.8),
             )
             trial_quantiles.append(
-                self._single_config_quantiles(
-                    {best_config: samples}
-                )
+                self._single_config_quantiles({best_config: samples})
             )
 
-        return tuple(
-            statistics.median(values)
-            for values in zip(*trial_quantiles)
-        )
+        return tuple(statistics.median(values) for values in zip(*trial_quantiles))
 
     def benchmark(
         self,

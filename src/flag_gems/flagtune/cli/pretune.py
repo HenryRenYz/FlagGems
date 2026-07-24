@@ -46,8 +46,8 @@ import re
 import sys
 import time
 from dataclasses import dataclass, replace
-from decimal import Decimal, ROUND_FLOOR
 from datetime import datetime
+from decimal import ROUND_FLOOR, Decimal
 from pathlib import Path
 from typing import Any, Optional, Sequence, Union
 from urllib.parse import urlsplit, urlunsplit
@@ -58,8 +58,7 @@ SOURCE_ROOT = PROJECT_ROOT / "src"
 if str(SOURCE_ROOT) not in sys.path:
     sys.path.insert(0, str(SOURCE_ROOT))
 
-from flag_gems.flagtune.collection.scheduler import (
-    BenchmarkError,
+from flag_gems.flagtune.collection.scheduler import (  # noqa: E402
     DEFAULT_BENCHMARK_ITERATIONS_MS,
     DEFAULT_BENCHMARK_MODE,
     DEFAULT_BENCHMARK_RETRIES,
@@ -67,17 +66,21 @@ from flag_gems.flagtune.collection.scheduler import (
     DEFAULT_LATENCY_ITERATIONS_MS,
     DEFAULT_LATENCY_TRIALS,
     DEFAULT_LATENCY_WARMUP_MS,
+    BenchmarkError,
     parse_sqlite_url,
     run_shape_config_benchmarks,
 )
-from flag_gems.flagtune.contracts.operator import (
+from flag_gems.flagtune.contracts.operator import (  # noqa: E402
     OperatorBenchmarkSpec,
     OperatorConfigError,
     initialize_planning_context,
     load_operator_benchmark_spec,
 )
-from flag_gems.flagtune.contracts.records import PlanningContext, ShapeRecord
-from flag_gems.flagtune.reporting.artifacts import (
+from flag_gems.flagtune.contracts.records import (  # noqa: E402
+    PlanningContext,
+    ShapeRecord,
+)
+from flag_gems.flagtune.reporting.artifacts import (  # noqa: E402
     PretuneIOError,
     combine_logs,
     load_shape_config,
@@ -86,7 +89,7 @@ from flag_gems.flagtune.reporting.artifacts import (
     write_manifest,
     write_outputs,
 )
-from flag_gems.flagtune.reporting.schema import SCHEMA_VERSION
+from flag_gems.flagtune.reporting.schema import SCHEMA_VERSION  # noqa: E402
 
 DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "flagtune-pretune-output"
 STRATEGY_ENV_NAMES = (
@@ -628,12 +631,8 @@ def run_main(args: argparse.Namespace) -> int:
     failed_rows = sum(row.get("status") != "ok" for row in rows)
     missing_rows = len(selected) - len(rows)
     write_outputs(run_dir, rows, spec.shape.identity)
-    cached_count = sum(
-        int(row.get("benchmark_cache_hit_count") or 0) for row in rows
-    )
-    measured_count = sum(
-        int(row.get("benchmark_success_count") or 0) for row in rows
-    )
+    cached_count = sum(int(row.get("benchmark_cache_hit_count") or 0) for row in rows)
+    measured_count = sum(int(row.get("benchmark_success_count") or 0) for row in rows)
     failed = (
         failed_rows > 0
         or missing_rows > 0

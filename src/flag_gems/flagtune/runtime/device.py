@@ -16,12 +16,12 @@ import os
 from dataclasses import dataclass
 from typing import Any, Mapping, MutableMapping, Sequence
 
+from triton.flagtune.contract.identity import gpu_metadata
 from triton.flagtune.runtime.device import (
     DeviceDescriptor,
     DeviceProbeError,
     probe_flagtune_device,
 )
-from triton.flagtune.contract.identity import gpu_metadata
 
 
 class DeviceUnavailableError(DeviceProbeError):
@@ -144,9 +144,7 @@ class DeviceRuntime:
         try:
             return getattr(self._torch_module, name)
         except AttributeError as exc:
-            raise DeviceProbeError(
-                f"installed torch has no dtype {name!r}"
-            ) from exc
+            raise DeviceProbeError(f"installed torch has no dtype {name!r}") from exc
 
     def make_tensor(
         self,
@@ -245,9 +243,7 @@ def probe_flagtune_environment() -> FlagTuneEnvironment:
     try:
         import torch
     except ImportError as exc:
-        raise DeviceProbeError(
-            "FlagTune device probing requires PyTorch"
-        ) from exc
+        raise DeviceProbeError("FlagTune device probing requires PyTorch") from exc
     runtime = DeviceRuntime(descriptor, torch)
     if not runtime.is_available():
         raise DeviceUnavailableError(

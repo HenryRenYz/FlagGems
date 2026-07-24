@@ -22,7 +22,6 @@ from pathlib import Path
 
 import pytest
 
-
 SCRIPT_PATH = (
     Path(__file__).resolve().parents[2]
     / "src"
@@ -140,19 +139,13 @@ def make_v3_row(input_row_index, tuning, latency, mode="replay"):
             "benchmark_requested_mode": mode,
             "benchmark_resolved_mode": mode,
             "benchmark_implementation": (
-                "triton_cuda_graph_replay_v1"
-                if mode == "replay"
-                else "triton_do_bench"
+                "triton_cuda_graph_replay_v1" if mode == "replay" else "triton_do_bench"
             ),
-            "benchmark_cache_policy": (
-                "warm_l2" if mode == "replay" else "cold_l2"
-            ),
+            "benchmark_cache_policy": ("warm_l2" if mode == "replay" else "cold_l2"),
             "benchmark_warmup_ms": "25",
             "benchmark_measurement_ms": "100",
             "benchmark_retries": "10" if mode == "replay" else "1",
-            "benchmark_per_replay_ms": (
-                "10.000000" if mode == "replay" else ""
-            ),
+            "benchmark_per_replay_ms": ("10.000000" if mode == "replay" else ""),
             "benchmark_fallback_reason": "",
             "latency_warmup_ms": "25",
             "latency_measurement_ms": "100",

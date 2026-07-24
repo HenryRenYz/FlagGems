@@ -127,8 +127,8 @@ def _prepare_tasks(
     """Convert user cases to indexed, JSON-serializable executor payloads."""
     if not shape_configs:
         raise BenchmarkError("shape_configs must contain at least one case")
-    from flag_gems.flagtune.runtime.executor import prepare_benchmark_case
     from flag_gems.flagtune.contracts.operator import load_operator_benchmark_spec
+    from flag_gems.flagtune.runtime.executor import prepare_benchmark_case
 
     try:
         spec = load_operator_benchmark_spec(operator_config)
@@ -255,6 +255,7 @@ def _default_database_url() -> str:
     if inherited:
         return inherited
     import triton
+
     from flag_gems.runtime.backend import _state
     from flag_gems.utils.code_cache import config_cache_dir
 
@@ -306,9 +307,7 @@ def _run_worker(args: argparse.Namespace) -> int:
     """
     os.environ["FLAGGEMS_DB_URL"] = args.database_url
 
-    from flag_gems.flagtune.runtime.device import (
-        probe_flagtune_environment,
-    )
+    from flag_gems.flagtune.runtime.device import probe_flagtune_environment
 
     environment = probe_flagtune_environment()
     if environment.runtime.backend != args.device_backend:
@@ -757,18 +756,14 @@ def run_shape_config_benchmarks(
     work_path = Path(work_dir).expanduser().resolve()
     work_path.mkdir(parents=True, exist_ok=True)
 
-    from flag_gems.flagtune.runtime.device import (
-        probe_flagtune_environment,
-    )
+    from flag_gems.flagtune.runtime.device import probe_flagtune_environment
 
     try:
         environment = probe_flagtune_environment()
     except Exception as exc:
         raise BenchmarkError(f"FlagTune device preflight failed: {exc}") from exc
     if gpu_tokens is None:
-        tokens = environment.runtime.visible_device_tokens(
-            environment.device_count
-        )
+        tokens = environment.runtime.visible_device_tokens(environment.device_count)
     else:
         tokens = [str(token) for token in gpu_tokens]
         if not tokens:

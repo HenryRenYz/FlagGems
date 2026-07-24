@@ -74,7 +74,7 @@ variants:
       # comparisons, boolean logic, alignment, log2, and pow); an unknown
       # operation, symbol, or mapping key is rejected during compilation.
       op: all
-      args: 
+      args:
         - op: gt
           args: [N, 1]
         - op: not
@@ -84,7 +84,7 @@ variants:
                 - {op: lt, args: [M, 2048]}
                 - {op: lt, args: [N, 2048]}
                 - {op: ge, args: [K, 4096]}
-    
+
     params:
       # Each parameter is one emitted kernel-config field and must be
       # ``{values: [non-empty legal values...]}``.  FlagTree enumerates the

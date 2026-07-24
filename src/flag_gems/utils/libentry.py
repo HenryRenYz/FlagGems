@@ -46,7 +46,11 @@ from typing import (
 )
 
 import triton
-from triton.runtime.benchmark import BenchmarkMode, BenchmarkProtocol, resolve_benchmarker
+from triton.runtime.benchmark import (
+    BenchmarkMode,
+    BenchmarkProtocol,
+    resolve_benchmarker,
+)
 
 from flag_gems import runtime
 from flag_gems.runtime import device, torch_device_fn
@@ -372,13 +376,9 @@ class LibTuner(triton.runtime.Autotuner):
             ``TRITON_USE_FLAGTUNE``.  The similar names represent independent
             mechanisms and must not be treated as aliases.
         """
-        selected_benchmark_mode = _select_benchmark_mode(
-            benchmark_mode, use_cuda_graph
-        )
+        selected_benchmark_mode = _select_benchmark_mode(benchmark_mode, use_cuda_graph)
         benchmark_retries = _validate_benchmark_retries(benchmark_retries)
-        effective_warmup = (
-            warmup if warmup is not None else DEFAULT_BENCHMARK_WARMUP_MS
-        )
+        effective_warmup = warmup if warmup is not None else DEFAULT_BENCHMARK_WARMUP_MS
         effective_rep = rep if rep is not None else DEFAULT_BENCHMARK_REP_MS
         resolved_benchmark = None
         if do_bench is None and not (
@@ -876,9 +876,7 @@ class LibTuner(triton.runtime.Autotuner):
             ):
                 protocol_benchmark = self.do_bench
 
-                def benchmark_with_requested_quantiles(
-                    kernel_call, quantiles
-                ):
+                def benchmark_with_requested_quantiles(kernel_call, quantiles):
                     # Triton's _bench always requests its canonical
                     # (p50, p20, p80) order. This fixed-config API promises the
                     # caller's explicit order, so override only that argument
@@ -916,13 +914,9 @@ class LibTuner(triton.runtime.Autotuner):
         """
         self.benchmark_success_count = 0
         self.benchmark_cache_hit_count = 0
-        run_mode = LibTunerRunMode(
-            getattr(self, "_run_mode", LibTunerRunMode.NORMAL)
-        )
+        run_mode = LibTunerRunMode(getattr(self, "_run_mode", LibTunerRunMode.NORMAL))
         bypass_config_cache = run_mode is not LibTunerRunMode.NORMAL
-        exhaustive_collection = (
-            run_mode is LibTunerRunMode.EXHAUSTIVE_COLLECTION
-        )
+        exhaustive_collection = run_mode is LibTunerRunMode.EXHAUSTIVE_COLLECTION
         if hasattr(self, "seen_tuned_metas"):
             self.seen_tuned_metas = {}  # flagtree aabs: deduplicate tuned meta
         self._last_benchmark_args = tuple(args)
@@ -1092,7 +1086,10 @@ def _ensure_flagtune_proposer(identity):
         process does not invalidate these pools.
     """
     if identity not in _FLAGTUNE_PROPOSER_POOL:
-        from triton.flagtune.runtime.proposer import load_model_bundle, make_config_proposer
+        from triton.flagtune.runtime.proposer import (
+            load_model_bundle,
+            make_config_proposer,
+        )
 
         _FLAGTUNE_PROPOSER_POOL[identity] = make_config_proposer(
             identity.op_id,
@@ -1669,8 +1666,7 @@ class LibEntry(triton.KernelInterface):
         if self._has_flagtune_tuner:
             flagtune_dtypes = _infer_tensor_dtypes(args)
             const_args.append(
-                ("flagtune_dtypes",)
-                + tuple(str(value) for value in flagtune_dtypes)
+                ("flagtune_dtypes",) + tuple(str(value) for value in flagtune_dtypes)
             )
 
         entry_key = self.key(spec_args, dns_args, const_args)

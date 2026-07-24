@@ -154,9 +154,7 @@ def make_run_dir(output_root: Path, op_text: str) -> Path:
     return run_dir
 
 
-def remove_intermediate_artifacts(
-    run_dir: Path, paths: Sequence[Path]
-) -> list[str]:
+def remove_intermediate_artifacts(run_dir: Path, paths: Sequence[Path]) -> list[str]:
     """Delete explicitly named process artifacts below one completed run.
 
     Args:

@@ -49,24 +49,6 @@ SOURCE_ROOT = PROJECT_ROOT / "src"
 if str(SOURCE_ROOT) not in sys.path:
     sys.path.insert(0, str(SOURCE_ROOT))
 
-from flag_gems.flagtune.collection.scheduler import (  # noqa: E402
-    BenchmarkError,
-    DEFAULT_BENCHMARK_ITERATIONS_MS,
-    DEFAULT_BENCHMARK_MODE,
-    DEFAULT_BENCHMARK_RETRIES,
-    DEFAULT_BENCHMARK_WARMUP_MS,
-    run_shape_config_benchmarks,
-)
-from flag_gems.flagtune.contracts.operator import (  # noqa: E402
-    OperatorConfigError,
-    initialize_planning_context,
-    load_operator_benchmark_spec,
-)
-from flag_gems.flagtune.reporting.schema import (  # noqa: E402
-    SCHEMA_VERSION,
-    pretune_json_row,
-    rounded_ms,
-)
 from flag_gems.flagtune.cli.pretune import (  # noqa: E402
     PretuneError,
     environment_snapshot,
@@ -77,11 +59,29 @@ from flag_gems.flagtune.cli.pretune import (  # noqa: E402
     select_shape_records,
     visible_device_tokens,
 )
+from flag_gems.flagtune.collection.scheduler import (  # noqa: E402
+    DEFAULT_BENCHMARK_ITERATIONS_MS,
+    DEFAULT_BENCHMARK_MODE,
+    DEFAULT_BENCHMARK_RETRIES,
+    DEFAULT_BENCHMARK_WARMUP_MS,
+    BenchmarkError,
+    run_shape_config_benchmarks,
+)
+from flag_gems.flagtune.contracts.operator import (  # noqa: E402
+    OperatorConfigError,
+    initialize_planning_context,
+    load_operator_benchmark_spec,
+)
 from flag_gems.flagtune.reporting.artifacts import (  # noqa: E402
-    make_run_dir,
     PretuneIOError,
+    make_run_dir,
     remove_intermediate_artifacts,
     write_manifest,
+)
+from flag_gems.flagtune.reporting.schema import (  # noqa: E402
+    SCHEMA_VERSION,
+    pretune_json_row,
+    rounded_ms,
 )
 
 DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "flagtune-train-output"
@@ -413,23 +413,16 @@ def _append_collection_rows(
         failure_path.open("a", encoding="utf-8") as failure_file,
     ):
         for result in results:
-            missing_shape_fields = [
-                name for name in shape_fields if name not in result
-            ]
+            missing_shape_fields = [name for name in shape_fields if name not in result]
             workload_dimensions = {
-                name: result[name]
-                for name in shape_fields
-                if name in result
+                name: result[name] for name in shape_fields if name in result
             }
             if missing_shape_fields:
                 failed = pretune_json_row(result, shape_fields)
                 failed["collection_error"] = (
-                    "missing workload dimensions: "
-                    + ", ".join(missing_shape_fields)
+                    "missing workload dimensions: " + ", ".join(missing_shape_fields)
                 )
-                failure_file.write(
-                    json.dumps(failed, sort_keys=True, allow_nan=False)
-                )
+                failure_file.write(json.dumps(failed, sort_keys=True, allow_nan=False))
                 failure_file.write("\n")
                 failed_shapes += 1
                 continue
@@ -450,9 +443,7 @@ def _append_collection_rows(
                 failed["collection_error"] = (
                     f"expected {expected_config_count} config timings, got {len(timings)}"
                 )
-                failure_file.write(
-                    json.dumps(failed, sort_keys=True, allow_nan=False)
-                )
+                failure_file.write(json.dumps(failed, sort_keys=True, allow_nan=False))
                 failure_file.write("\n")
                 failed_shapes += 1
                 continue
@@ -466,9 +457,7 @@ def _append_collection_rows(
             except Exception as exc:
                 failed = pretune_json_row(result, shape_fields)
                 failed["collection_error"] = f"cannot normalize training inputs: {exc}"
-                failure_file.write(
-                    json.dumps(failed, sort_keys=True, allow_nan=False)
-                )
+                failure_file.write(json.dumps(failed, sort_keys=True, allow_nan=False))
                 failure_file.write("\n")
                 failed_shapes += 1
                 continue
@@ -480,11 +469,7 @@ def _append_collection_rows(
             }
             for config_order, timing in enumerate(timings):
                 serialized_timing = {
-                    name: (
-                        rounded_ms(value)
-                        if name.endswith("_ms")
-                        else value
-                    )
+                    name: (rounded_ms(value) if name.endswith("_ms") else value)
                     for name, value in dict(timing).items()
                 }
                 row = {
@@ -832,7 +817,10 @@ def run_main(args: argparse.Namespace) -> int:
     try:
         from triton.flagtune.contract.identity import ModelIdentity
         from triton.flagtune.contract.operator_schema import model_config_sha256
-        from triton.flagtune.training.ranker import export_ranker_model, train_xgboost_ranker
+        from triton.flagtune.training.ranker import (
+            export_ranker_model,
+            train_xgboost_ranker,
+        )
 
         options = _training_options(args)
         _status(
@@ -922,9 +910,7 @@ def run_main(args: argparse.Namespace) -> int:
             "expected_benchmark_row_count": expected_rows,
             "max_configs_per_shape": args.max_configs_per_shape,
             "feature_count": len(variant_info.feature_names),
-            "estimated_dense_float32_bytes": plan[
-                "estimated_dense_float32_bytes"
-            ],
+            "estimated_dense_float32_bytes": plan["estimated_dense_float32_bytes"],
             "sort": sort_spec.mode,
             "random_seed": sort_spec.seed,
         },

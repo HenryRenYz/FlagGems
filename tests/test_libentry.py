@@ -673,9 +673,7 @@ def test_benchmark_success_count_tracks_finite_uncached_benchmarks(monkeypatch):
     config_cache.values = {(32,): configs[1]}
     config_cache.reset_access_counts()
     benchmark_cache.values = {configs[0]: (7.0, 8.0, 9.0)}
-    with LibTuner.use_run_mode(
-        tuner, LibTunerRunMode.EXHAUSTIVE_COLLECTION
-    ):
+    with LibTuner.use_run_mode(tuner, LibTunerRunMode.EXHAUSTIVE_COLLECTION):
         LibTuner.run(tuner, 32)
     assert tuner.benchmark_success_count == 1
     assert tuner.benchmark_cache_hit_count == 1
@@ -767,6 +765,7 @@ def test_benchmark_key_preserves_raw_shape_and_scopes_timing_protocol(monkeypatc
             benchmark=lambda _call, _quantiles: None,
         ),
     )
+
     class FakeScopedLibCache:
         def __getitem__(self, _key):
             return object()
@@ -804,7 +803,10 @@ def test_benchmark_key_preserves_raw_shape_and_scopes_timing_protocol(monkeypatc
 
 @pytest.mark.parametrize(
     ("use_cuda_graph", "expected"),
-    [(True, libentry_mod.BenchmarkMode.REPLAY), (False, libentry_mod.BenchmarkMode.EVENT)],
+    [
+        (True, libentry_mod.BenchmarkMode.REPLAY),
+        (False, libentry_mod.BenchmarkMode.EVENT),
+    ],
 )
 def test_deprecated_cuda_graph_alias_maps_to_benchmark_mode(use_cuda_graph, expected):
     """Keep the legacy boolean API while making replay the implicit default."""
@@ -937,6 +939,7 @@ def test_benchmark_config_reuses_kernel_context_and_bypasses_caches(monkeypatch)
         return SimpleNamespace(protocol=protocol, benchmark=benchmark)
 
     monkeypatch.setattr(libentry_mod, "resolve_benchmarker", fake_resolve)
+
     class FakeScopedLibCache:
         def __getitem__(self, _key):
             return object()

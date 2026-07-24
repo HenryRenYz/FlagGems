@@ -23,8 +23,8 @@ import importlib.util
 import json
 import sqlite3
 import sys
-from types import SimpleNamespace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -38,7 +38,9 @@ SCRIPT_PATH = (
     / "pretune.py"
 )
 BENCHMARK_PATH = SCRIPT_PATH.parents[1] / "collection" / "scheduler.py"
-CONFIG_PATH = SCRIPT_PATH.parents[1] / "contracts" / "configs" / "mm_flagtune_configs.yaml"
+CONFIG_PATH = (
+    SCRIPT_PATH.parents[1] / "contracts" / "configs" / "mm_flagtune_configs.yaml"
+)
 
 
 def load_path(path, name):
@@ -828,13 +830,9 @@ def test_public_batch_api_rejects_unknown_or_misaligned_input_dtypes(tmp_path):
             cases, tuning_run_mode="ambient_environment", **common
         )
     with pytest.raises(mod.BenchmarkError, match="benchmark_mode"):
-        mod.run_shape_config_benchmarks(
-            cases, benchmark_mode="cuda_graph", **common
-        )
+        mod.run_shape_config_benchmarks(cases, benchmark_mode="cuda_graph", **common)
     with pytest.raises(mod.BenchmarkError, match="benchmark_retries"):
-        mod.run_shape_config_benchmarks(
-            cases, benchmark_retries=0, **common
-        )
+        mod.run_shape_config_benchmarks(cases, benchmark_retries=0, **common)
 
 
 def test_sqlite_url_classification(tmp_path):

@@ -764,9 +764,7 @@ def initialize_planning_context(
         import triton
 
         import flag_gems
-        from flag_gems.flagtune.runtime.device import (
-            probe_flagtune_environment,
-        )
+        from flag_gems.flagtune.runtime.device import probe_flagtune_environment
         from flag_gems.runtime.backend import _state
 
         resolve_public_operator(flag_gems, spec.op_id)

@@ -3,12 +3,9 @@
 from types import SimpleNamespace
 
 import pytest
-
-from flag_gems.flagtune.runtime.device import (
-    DeviceRuntime,
-    DeviceUnavailableError,
-)
 from triton.flagtune.runtime.device import DeviceDescriptor, DeviceProbeError
+
+from flag_gems.flagtune.runtime.device import DeviceRuntime, DeviceUnavailableError
 
 
 class _FakeDeviceAPI:
@@ -85,9 +82,9 @@ def test_hip_runtime_uses_rocm_visibility_names_without_changing_torch_api():
     runtime.apply_worker_visibility(environment, "3")
 
     assert environment == {"ROCR_VISIBLE_DEVICES": "3"}
-    assert runtime.visible_device_tokens(
-        1, environ={"ROCR_VISIBLE_DEVICES": "6"}
-    ) == ["6"]
+    assert runtime.visible_device_tokens(1, environ={"ROCR_VISIBLE_DEVICES": "6"}) == [
+        "6"
+    ]
 
 
 def test_runtime_rejects_missing_or_empty_device_api():
@@ -114,12 +111,15 @@ def test_runtime_resolves_benchmark_only_through_triton_boundary(monkeypatch):
         fake_resolve,
     )
 
-    assert runtime.resolve_benchmarker(
-        "replay",
-        warmup_ms=25,
-        measurement_ms=100,
-        n_retries=10,
-    ) is sentinel
+    assert (
+        runtime.resolve_benchmarker(
+            "replay",
+            warmup_ms=25,
+            measurement_ms=100,
+            n_retries=10,
+        )
+        is sentinel
+    )
     assert observed == {
         "mode": "replay",
         "warmup_ms": 25,

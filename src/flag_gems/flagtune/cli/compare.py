@@ -25,7 +25,7 @@ SOURCE_ROOT = PROJECT_ROOT / "src"
 if str(SOURCE_ROOT) not in sys.path:
     sys.path.insert(0, str(SOURCE_ROOT))
 
-from flag_gems.flagtune.reporting.schema import (
+from flag_gems.flagtune.reporting.schema import (  # noqa: E402
     SCHEMA_VERSION,
     format_derived,
     format_ms,
@@ -105,9 +105,7 @@ def _dimension_columns(fieldnames: Sequence[str], label: str) -> tuple[str, ...]
     if not dimensions:
         raise ComparisonError(f"{label} CSV has no workload dimension columns")
     if len(set(dimensions)) != len(dimensions):
-        raise ComparisonError(
-            f"{label} CSV has duplicate workload dimension columns"
-        )
+        raise ComparisonError(f"{label} CSV has duplicate workload dimension columns")
     return dimensions
 
 
@@ -163,9 +161,7 @@ def _normalize_schema(
     names = set(fieldnames)
     is_v2 = "input_row_index" in names
     if not is_v2 and "source_index" not in names:
-        raise ComparisonError(
-            "Pretune CSV is missing input_row_index/source_index"
-        )
+        raise ComparisonError("Pretune CSV is missing input_row_index/source_index")
     normalized = []
     for source in rows:
         row = dict(source)
@@ -239,8 +235,7 @@ def _validate_identity(
     ]
     if mismatches:
         details = ", ".join(
-            f"{name}={baseline.get(name)!r}/{ours.get(name)!r}"
-            for name in mismatches
+            f"{name}={baseline.get(name)!r}/{ours.get(name)!r}" for name in mismatches
         )
         raise ComparisonError(
             f"input_row_index {input_row_index} identity mismatch: {details}"
@@ -265,8 +260,7 @@ def _validate_protocol_schemas(
     if ours_present != expected:
         missing = sorted(expected - ours_present)
         raise ComparisonError(
-            "ours CSV has incomplete benchmark protocol metadata: "
-            + ", ".join(missing)
+            "ours CSV has incomplete benchmark protocol metadata: " + ", ".join(missing)
         )
     return True
 
@@ -284,8 +278,7 @@ def _validate_protocol_identity(
     ]
     if mismatches:
         details = ", ".join(
-            f"{name}={baseline.get(name)!r}/{ours.get(name)!r}"
-            for name in mismatches
+            f"{name}={baseline.get(name)!r}/{ours.get(name)!r}" for name in mismatches
         )
         raise ComparisonError(
             f"input_row_index {input_row_index} benchmark protocol mismatch: "
@@ -312,13 +305,9 @@ def compare_rows(
         )
     identity_columns = ("op_name", "variant", *baseline_dimensions)
     copy_columns = _copy_columns(baseline_dimensions)
-    baseline_rows, baseline_fields = _normalize_schema(
-        baseline_rows, baseline_fields
-    )
+    baseline_rows, baseline_fields = _normalize_schema(baseline_rows, baseline_fields)
     ours_rows, ours_fields = _normalize_schema(ours_rows, ours_fields)
-    protocol_aware = _validate_protocol_schemas(
-        baseline_fields, ours_fields
-    )
+    protocol_aware = _validate_protocol_schemas(baseline_fields, ours_fields)
     required = [
         "input_row_index",
         "status",
@@ -358,9 +347,7 @@ def compare_rows(
             shared_errors.append(f"ours status is {ours.get('status')!r}")
         tuning_errors = list(shared_errors)
         if baseline_tuning is None:
-            tuning_errors.append(
-                f"baseline {tuning_column} is not finite/non-negative"
-            )
+            tuning_errors.append(f"baseline {tuning_column} is not finite/non-negative")
         if ours_tuning is None:
             tuning_errors.append(f"ours {tuning_column} is not finite/non-negative")
         elif ours_tuning == 0:
@@ -379,13 +366,9 @@ def compare_rows(
         elif ours_latency == 0:
             throughput_errors.append(f"ours {latency_column} is zero")
 
-        tuning_speedup = (
-            None if tuning_errors else baseline_tuning / ours_tuning
-        )
+        tuning_speedup = None if tuning_errors else baseline_tuning / ours_tuning
         relative_throughput = (
-            None
-            if throughput_errors
-            else baseline_latency / ours_latency * 100.0
+            None if throughput_errors else baseline_latency / ours_latency * 100.0
         )
         errors = tuning_errors + [
             error for error in throughput_errors if error not in tuning_errors
@@ -394,10 +377,7 @@ def compare_rows(
         output = {name: baseline.get(name, "") for name in copy_columns}
         if protocol_aware:
             output.update(
-                {
-                    name: baseline.get(name, "")
-                    for name in BENCHMARK_PROTOCOL_COLUMNS
-                }
+                {name: baseline.get(name, "") for name in BENCHMARK_PROTOCOL_COLUMNS}
             )
         output["schema_version"] = str(SCHEMA_VERSION)
         output["baseline_tuning_time_ms"] = format_ms(baseline_tuning)
@@ -451,12 +431,8 @@ def _policy_json(row: Mapping[str, str], prefix: str) -> dict[str, Any]:
         "execution": {
             "status": row.get(f"{prefix}_status"),
             "error": row.get(f"{prefix}_error", ""),
-            "tuning_time_ms": rounded_ms(
-                row.get(f"{prefix}_tuning_time_ms")
-            ),
-            "latency_p50_ms": rounded_ms(
-                row.get(f"{prefix}_latency_p50_ms")
-            ),
+            "tuning_time_ms": rounded_ms(row.get(f"{prefix}_tuning_time_ms")),
+            "latency_p50_ms": rounded_ms(row.get(f"{prefix}_latency_p50_ms")),
         },
         "config_search": {
             "tuning_cache_hit": _json_value(
@@ -484,9 +460,7 @@ def comparison_json_row(
             "variant": row.get("variant") or None,
         },
         "workload": {
-            "dimensions": {
-                name: _json_value(row.get(name)) for name in dimensions
-            },
+            "dimensions": {name: _json_value(row.get(name)) for name in dimensions},
             "Count": _json_value(row.get("Count")),
         },
         "dtypes": {
@@ -500,20 +474,12 @@ def comparison_json_row(
             "implementation": row.get("benchmark_implementation") or None,
             "cache_policy": row.get("benchmark_cache_policy") or None,
             "warmup_ms": _json_value(row.get("benchmark_warmup_ms")),
-            "measurement_ms": _json_value(
-                row.get("benchmark_measurement_ms")
-            ),
+            "measurement_ms": _json_value(row.get("benchmark_measurement_ms")),
             "n_retries": _json_value(row.get("benchmark_retries")),
-            "per_replay_ms": rounded_ms(
-                row.get("benchmark_per_replay_ms")
-            ),
+            "per_replay_ms": rounded_ms(row.get("benchmark_per_replay_ms")),
             "fallback_reason": row.get("benchmark_fallback_reason") or None,
-            "latency_warmup_ms": _json_value(
-                row.get("latency_warmup_ms")
-            ),
-            "latency_measurement_ms": _json_value(
-                row.get("latency_measurement_ms")
-            ),
+            "latency_warmup_ms": _json_value(row.get("latency_warmup_ms")),
+            "latency_measurement_ms": _json_value(row.get("latency_measurement_ms")),
             "latency_trials": _json_value(row.get("latency_trials")),
         },
         "baseline": _policy_json(row, "baseline"),
@@ -540,9 +506,7 @@ def write_comparison(path: Path, rows: Sequence[Mapping[str, str]]) -> Path:
     dimensions = _dimension_columns(list(rows[0]), "comparison")
     try:
         with path.open("w", encoding="utf-8", newline="") as handle:
-            writer = csv.DictWriter(
-                handle, fieldnames=output_fieldnames(dimensions)
-            )
+            writer = csv.DictWriter(handle, fieldnames=output_fieldnames(dimensions))
             writer.writeheader()
             writer.writerows(rows)
         with jsonl_path.open("w", encoding="utf-8") as handle:
@@ -556,7 +520,9 @@ def write_comparison(path: Path, rows: Sequence[Mapping[str, str]]) -> Path:
                 )
                 handle.write("\n")
     except (OSError, csv.Error) as exc:
-        raise ComparisonError(f"cannot write comparison artifacts {path}: {exc}") from exc
+        raise ComparisonError(
+            f"cannot write comparison artifacts {path}: {exc}"
+        ) from exc
     return jsonl_path
 
 

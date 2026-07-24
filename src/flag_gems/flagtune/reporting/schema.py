@@ -56,9 +56,7 @@ def _round_ms_fields(value: Any) -> Any:
     if isinstance(value, Mapping):
         return {
             str(key): (
-                rounded_ms(item)
-                if str(key).endswith("_ms")
-                else _round_ms_fields(item)
+                rounded_ms(item) if str(key).endswith("_ms") else _round_ms_fields(item)
             )
             for key, item in value.items()
         }
@@ -67,9 +65,7 @@ def _round_ms_fields(value: Any) -> Any:
     return value
 
 
-def _dimensions(
-    row: Mapping[str, Any], shape_fields: Sequence[str]
-) -> dict[str, Any]:
+def _dimensions(row: Mapping[str, Any], shape_fields: Sequence[str]) -> dict[str, Any]:
     """Return ordered named dimensions, falling back to the positional shape."""
     positional = row.get("shape")
     values = list(positional) if isinstance(positional, (list, tuple)) else []
@@ -222,9 +218,7 @@ def pretune_csv_row(
         "benchmark_warmup_ms": benchmark_protocol.get("warmup_ms"),
         "benchmark_measurement_ms": benchmark_protocol.get("measurement_ms"),
         "benchmark_retries": benchmark_protocol.get("n_retries"),
-        "benchmark_per_replay_ms": format_ms(
-            benchmark_protocol.get("per_replay_ms")
-        ),
+        "benchmark_per_replay_ms": format_ms(benchmark_protocol.get("per_replay_ms")),
         "benchmark_fallback_reason": benchmark_protocol.get("fallback_reason"),
         "latency_warmup_ms": row.get("latency_warmup_ms"),
         "latency_measurement_ms": row.get("latency_iterations_ms"),

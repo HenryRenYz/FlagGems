@@ -22,6 +22,7 @@ import math
 import multiprocessing
 import os
 import time
+import warnings
 from abc import abstractmethod
 from collections import OrderedDict
 from contextlib import contextmanager
@@ -45,6 +46,7 @@ from typing import (
 )
 
 import triton
+from triton.runtime.benchmark import BenchmarkMode, BenchmarkProtocol, resolve_benchmarker
 
 from flag_gems import runtime
 from flag_gems.runtime import device, torch_device_fn
@@ -95,6 +97,40 @@ FLAGGEMS_DB_URL = os.getenv("FLAGGEMS_DB_URL", None)
 BENCHMARK_CACHE_SCHEMA_VERSION = 2
 DEFAULT_BENCHMARK_WARMUP_MS = 25
 DEFAULT_BENCHMARK_REP_MS = 100
+DEFAULT_BENCHMARK_RETRIES = 10
+
+
+def _select_benchmark_mode(
+    benchmark_mode: Optional[Union[BenchmarkMode, str]],
+    use_cuda_graph: Optional[bool],
+) -> BenchmarkMode:
+    """Resolve the new architecture-neutral option and deprecated CUDA alias."""
+    if benchmark_mode is not None and use_cuda_graph is not None:
+        raise ValueError(
+            "benchmark_mode and deprecated use_cuda_graph cannot be supplied together"
+        )
+    if use_cuda_graph is not None:
+        warnings.warn(
+            "use_cuda_graph is deprecated; use benchmark_mode='replay' or "
+            "benchmark_mode='event'",
+            DeprecationWarning,
+            stacklevel=3,
+        )
+        return BenchmarkMode.REPLAY if use_cuda_graph else BenchmarkMode.EVENT
+    return BenchmarkMode(
+        benchmark_mode if benchmark_mode is not None else BenchmarkMode.REPLAY
+    )
+
+
+def _validate_benchmark_retries(benchmark_retries: int) -> int:
+    """Validate the replay sample count before legacy protocol construction."""
+    if (
+        not isinstance(benchmark_retries, int)
+        or isinstance(benchmark_retries, bool)
+        or benchmark_retries <= 0
+    ):
+        raise ValueError("benchmark_retries must be a positive integer")
+    return benchmark_retries
 
 
 def _infer_tensor_dtypes(values: Iterable[Any]) -> Tuple[Any, ...]:
@@ -293,7 +329,9 @@ class LibTuner(triton.runtime.Autotuner):
         prune_configs_by: Optional[Dict] = None,
         warmup=None,
         rep=None,
-        use_cuda_graph=False,
+        use_cuda_graph=None,
+        benchmark_mode=None,
+        benchmark_retries=DEFAULT_BENCHMARK_RETRIES,
         do_bench=None,
         strategy=None,
         flagtune_op_name=None,
@@ -334,6 +372,25 @@ class LibTuner(triton.runtime.Autotuner):
             ``TRITON_USE_FLAGTUNE``.  The similar names represent independent
             mechanisms and must not be treated as aliases.
         """
+        selected_benchmark_mode = _select_benchmark_mode(
+            benchmark_mode, use_cuda_graph
+        )
+        benchmark_retries = _validate_benchmark_retries(benchmark_retries)
+        effective_warmup = (
+            warmup if warmup is not None else DEFAULT_BENCHMARK_WARMUP_MS
+        )
+        effective_rep = rep if rep is not None else DEFAULT_BENCHMARK_REP_MS
+        resolved_benchmark = None
+        if do_bench is None and not (
+            major_version == 2 or (major_version == 3 and minor_version <= 1)
+        ):
+            resolved_benchmark = resolve_benchmarker(
+                selected_benchmark_mode,
+                warmup_ms=effective_warmup,
+                measurement_ms=effective_rep,
+                n_retries=benchmark_retries,
+            )
+            do_bench = resolved_benchmark.benchmark
         # NOTE(zhengyang): See discussion in https://github.com/triton-lang/triton/pull/4496
         if major_version == 2 or (major_version == 3 and minor_version <= 1):
             if warmup is None:
@@ -368,32 +425,10 @@ class LibTuner(triton.runtime.Autotuner):
                 prune_configs_by,
                 warmup,
                 rep,
-                use_cuda_graph,
+                selected_benchmark_mode is BenchmarkMode.REPLAY,
             )
         else:
             # Triton 3.2+ removed warmup/rep/use_cuda_graph positional arguments.
-            # Preserve FlagGems tuning behavior by translating them into do_bench.
-            if do_bench is None:
-                if use_cuda_graph:
-                    from triton.testing import do_bench_cudagraph
-
-                    def do_bench(kernel_call, quantiles):
-                        return do_bench_cudagraph(
-                            kernel_call,
-                            rep=rep if rep is not None else 100,
-                            quantiles=quantiles,
-                        )
-
-                elif warmup is not None or rep is not None:
-
-                    def do_bench(kernel_call, quantiles):
-                        return triton.testing.do_bench(
-                            kernel_call,
-                            warmup=warmup if warmup is not None else 25,
-                            rep=rep if rep is not None else 100,
-                            quantiles=quantiles,
-                        )
-
             super().__init__(
                 fn,
                 arg_names,
@@ -406,24 +441,36 @@ class LibTuner(triton.runtime.Autotuner):
                 prune_configs_by=prune_configs_by,
                 do_bench=do_bench,
             )
-        if use_cuda_graph:
-            self._benchmark_protocol = (
-                "triton_do_bench_cudagraph",
-                0,
-                rep if rep is not None else DEFAULT_BENCHMARK_REP_MS,
+        if resolved_benchmark is not None:
+            self.benchmark_protocol: Optional[BenchmarkProtocol] = (
+                resolved_benchmark.protocol
             )
-        elif do_bench is not None and warmup is None and rep is None:
+            self._benchmark_protocol = resolved_benchmark.protocol.cache_key()
+        elif do_bench is not None:
+            self.benchmark_protocol = None
             self._benchmark_protocol = ("custom_do_bench", -1, -1)
+        elif selected_benchmark_mode is BenchmarkMode.REPLAY:
+            per_replay_ms = float(effective_rep) / benchmark_retries
+            self.benchmark_protocol = None
+            self._benchmark_protocol = (
+                "triton_do_bench_cudagraph_legacy",
+                effective_warmup,
+                effective_rep,
+                benchmark_retries,
+                per_replay_ms,
+            )
         else:
+            self.benchmark_protocol = None
             self._benchmark_protocol = (
                 "triton_do_bench",
-                warmup if warmup is not None else DEFAULT_BENCHMARK_WARMUP_MS,
-                rep if rep is not None else DEFAULT_BENCHMARK_REP_MS,
+                effective_warmup,
+                effective_rep,
             )
+        self._benchmark_retries = benchmark_retries
         self.__name__ = self.base_fn.__name__
         self.keys = key
         self.strategy: List[Callable[[Any], Any]] = self._normalize_strategy(strategy)
-        self.config_table_name: str = f"{self.__name__}_{self.kernel_hash}"
+        self.config_table_name: str = self._make_config_table_name()
         self.benchmark_table_name: str = (
             f"{self.__name__}_{self.cache_key}_benchmark_v"
             f"{BENCHMARK_CACHE_SCHEMA_VERSION}"
@@ -450,6 +497,16 @@ class LibTuner(triton.runtime.Autotuner):
         self._flagtune_dtype_resolver = flagtune_dtype_resolver
         self._run_mode = LibTunerRunMode.NORMAL
 
+    def _make_config_table_name(self) -> str:
+        """Namespace best-config rows by timing protocol without losing event data."""
+        base = f"{self.__name__}_{self.kernel_hash}"
+        if self._benchmark_protocol[0] == "triton_do_bench":
+            return base
+        protocol_hash = hashlib.sha256(
+            repr(tuple(self._benchmark_protocol)).encode("utf-8")
+        ).hexdigest()[:12]
+        return f"{base}_benchmark_{protocol_hash}"
+
     def _normalize_strategy(self, strategy):
         if isinstance(strategy, str):
             strategy = LibTuner.get_strategy(strategy)
@@ -465,7 +522,7 @@ class LibTuner(triton.runtime.Autotuner):
         self.strategy = self._normalize_strategy(strategy)
         self.__dict__.pop("configs_hash", None)
         self.__dict__.pop("kernel_hash", None)
-        self.config_table_name = f"{self.__name__}_{self.kernel_hash}"
+        self.config_table_name = self._make_config_table_name()
         self.benchmark_table_name = (
             f"{self.__name__}_{self.cache_key}_benchmark_v"
             f"{BENCHMARK_CACHE_SCHEMA_VERSION}"
@@ -674,26 +731,52 @@ class LibTuner(triton.runtime.Autotuner):
             self._run_mode = previous
 
     @contextmanager
-    def use_benchmark_protocol(self, warmup: int, rep: int) -> Iterator[None]:
+    def use_benchmark_protocol(
+        self,
+        benchmark_mode: Union[BenchmarkMode, str],
+        warmup: int,
+        rep: int,
+        benchmark_retries: int = DEFAULT_BENCHMARK_RETRIES,
+    ) -> Iterator[BenchmarkProtocol]:
         """Scope the exact Triton timing protocol encoded by BenchmarkCache.
 
         Args:
+            benchmark_mode: Architecture-neutral ``event`` or ``replay`` mode.
             warmup: Non-negative Triton warmup duration in milliseconds.
             rep: Positive Triton measurement duration in milliseconds.
+            benchmark_retries: Positive replay sample count sharing ``rep``.
 
         The previous protocol is restored on exit so offline Train/Pretune
         overrides cannot leak into normal runtime autotuning.
         """
-        if warmup < 0:
-            raise ValueError("benchmark warmup must be non-negative")
-        if rep <= 0:
-            raise ValueError("benchmark repetition duration must be positive")
-        previous = self._benchmark_protocol
-        self._benchmark_protocol = ("triton_do_bench", int(warmup), int(rep))
+        selected_mode = BenchmarkMode(benchmark_mode)
+        resolved = resolve_benchmarker(
+            selected_mode,
+            warmup_ms=warmup,
+            measurement_ms=rep,
+            n_retries=benchmark_retries,
+        )
+        previous_protocol = self._benchmark_protocol
+        previous_public_protocol = self.benchmark_protocol
+        previous_do_bench = self.do_bench
+        previous_retries = self._benchmark_retries
+        previous_table_name = self.config_table_name
+        previous_cache = self.cache
+        self._benchmark_protocol = resolved.protocol.cache_key()
+        self.benchmark_protocol = resolved.protocol
+        self._benchmark_retries = benchmark_retries
+        self.do_bench = resolved.benchmark
+        self.config_table_name = self._make_config_table_name()
+        self.cache = libcache[self.config_table_name]
         try:
-            yield
+            yield resolved.protocol
         finally:
-            self._benchmark_protocol = previous
+            self._benchmark_protocol = previous_protocol
+            self.benchmark_protocol = previous_public_protocol
+            self._benchmark_retries = previous_retries
+            self.do_bench = previous_do_bench
+            self.config_table_name = previous_table_name
+            self.cache = previous_cache
 
     def benchmark_config(
         self,
@@ -701,6 +784,8 @@ class LibTuner(triton.runtime.Autotuner):
         *,
         warmup: int,
         rep: int,
+        benchmark_mode: Optional[Union[BenchmarkMode, str]] = None,
+        benchmark_retries: Optional[int] = None,
         quantiles: Tuple[float, ...] = (0.5, 0.2, 0.8),
         args: Optional[Tuple[Any, ...]] = None,
         meta: Optional[Dict[str, Any]] = None,
@@ -712,6 +797,9 @@ class LibTuner(triton.runtime.Autotuner):
                 performed.
             warmup: Triton benchmark warmup duration in milliseconds.
             rep: Triton benchmark measurement duration in milliseconds.
+            benchmark_mode: Optional event/replay override.  Omission reuses
+                this tuner's active requested mode.
+            benchmark_retries: Optional replay sample count override.
             quantiles: Quantiles returned in caller-specified order.
             args: Optional low-level kernel arguments. When omitted, reuse the
                 most recent arguments captured by :meth:`run`.
@@ -760,31 +848,55 @@ class LibTuner(triton.runtime.Autotuner):
                 "benchmark_config requires explicit args/meta or a prior LibTuner.run"
             )
 
-        original_do_bench = self.do_bench
         original_nargs = getattr(self, "nargs", None)
-
-        def configured_do_bench(kernel_call, quantiles):
-            return triton.testing.do_bench(
-                kernel_call,
-                warmup=warmup,
-                rep=rep,
-                quantiles=benchmark_quantiles,
+        current_protocol = self.benchmark_protocol
+        selected_mode = (
+            benchmark_mode
+            if benchmark_mode is not None
+            else (
+                current_protocol.requested_mode
+                if current_protocol is not None
+                else BenchmarkMode.EVENT
             )
-
-        self.do_bench = configured_do_bench
+        )
+        selected_retries = (
+            benchmark_retries
+            if benchmark_retries is not None
+            else self._benchmark_retries
+        )
         self.nargs = dict(zip(self.arg_names, benchmark_args))
         if hasattr(self, "seen_tuned_metas"):
             self.seen_tuned_metas = {}
         try:
-            return list(
-                self._bench(
-                    *benchmark_args,
-                    config=config,
-                    **benchmark_meta,
+            with self.use_benchmark_protocol(
+                selected_mode,
+                warmup,
+                rep,
+                selected_retries,
+            ):
+                protocol_benchmark = self.do_bench
+
+                def benchmark_with_requested_quantiles(
+                    kernel_call, quantiles
+                ):
+                    # Triton's _bench always requests its canonical
+                    # (p50, p20, p80) order. This fixed-config API promises the
+                    # caller's explicit order, so override only that argument
+                    # while retaining the resolved event/replay implementation.
+                    return protocol_benchmark(
+                        kernel_call,
+                        quantiles=benchmark_quantiles,
+                    )
+
+                self.do_bench = benchmark_with_requested_quantiles
+                return list(
+                    self._bench(
+                        *benchmark_args,
+                        config=config,
+                        **benchmark_meta,
+                    )
                 )
-            )
         finally:
-            self.do_bench = original_do_bench
             self.nargs = original_nargs
 
     def run(self, *args, **kwargs):
@@ -922,7 +1034,7 @@ def _flagtune_available() -> Tuple[bool, Optional[BaseException]]:
     global _FLAGTUNE_AVAILABILITY
     if _FLAGTUNE_AVAILABILITY is None:
         try:
-            from triton.flagtune.predict import (  # noqa: F401
+            from triton.flagtune.runtime.proposer import (  # noqa: F401
                 load_model_bundle,
                 make_config_proposer,
             )
@@ -980,7 +1092,7 @@ def _ensure_flagtune_proposer(identity):
         process does not invalidate these pools.
     """
     if identity not in _FLAGTUNE_PROPOSER_POOL:
-        from triton.flagtune.predict import load_model_bundle, make_config_proposer
+        from triton.flagtune.runtime.proposer import load_model_bundle, make_config_proposer
 
         _FLAGTUNE_PROPOSER_POOL[identity] = make_config_proposer(
             identity.op_id,
@@ -1123,7 +1235,7 @@ def flagtune_policy(
     if op_id is None or variant is None:
         return LibTuner.get("default").policy(self, bench_fn, configs, args, kwargs)
     try:
-        from triton.flagtune.identity import (
+        from triton.flagtune.contract.identity import (
             ModelIdentity,
             discover_gpu_metadata,
             make_dtype_key,
@@ -1321,7 +1433,9 @@ def libtuner(
     post_hook=None,
     warmup=25,
     rep=100,
-    use_cuda_graph=False,
+    use_cuda_graph=None,
+    benchmark_mode=None,
+    benchmark_retries=DEFAULT_BENCHMARK_RETRIES,
     do_bench=None,
     strategy: Union[
         str, Callable[[Any], Any], List[Union[str, Callable[[Any], Any]]]
@@ -1345,6 +1459,12 @@ def libtuner(
     `policy` accepts a string, which is the name of a registered `LibTuner` subclass, or a `LibTuner` subclass itself.
 
     FlagTune Args:
+        benchmark_mode: Architecture-neutral ``replay`` or ``event`` timing.
+            Omission defaults to ``replay``.
+        benchmark_retries: Timed replay samples sharing the total ``rep``
+            measurement budget.
+        use_cuda_graph: Deprecated compatibility alias for
+            ``benchmark_mode``.
         flagtune_op_name: FlagGems legacy runtime enablement key.
         flagtune_expand_op_name: Independent legacy expanded-config name; it
             defaults to ``flagtune_op_name``.
@@ -1388,6 +1508,8 @@ def libtuner(
             warmup=warmup,
             rep=rep,
             use_cuda_graph=use_cuda_graph,
+            benchmark_mode=benchmark_mode,
+            benchmark_retries=benchmark_retries,
             do_bench=do_bench,
             strategy=strategy,
             flagtune_op_name=flagtune_op_name,

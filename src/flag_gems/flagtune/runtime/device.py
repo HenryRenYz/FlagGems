@@ -16,12 +16,12 @@ import os
 from dataclasses import dataclass
 from typing import Any, Mapping, MutableMapping, Sequence
 
-from triton.flagtune.device import (
+from triton.flagtune.runtime.device import (
     DeviceDescriptor,
     DeviceProbeError,
     probe_flagtune_device,
 )
-from triton.flagtune.identity import gpu_metadata
+from triton.flagtune.contract.identity import gpu_metadata
 
 
 class DeviceUnavailableError(DeviceProbeError):
@@ -113,6 +113,31 @@ class DeviceRuntime:
             raise DeviceProbeError(
                 f"cannot synchronize backend {self.backend!r}: {exc}"
             ) from exc
+
+    def resolve_benchmarker(
+        self,
+        mode: str,
+        *,
+        warmup_ms: int,
+        measurement_ms: int,
+        n_retries: int,
+    ) -> Any:
+        """Resolve an event/replay benchmark through Triton's driver boundary.
+
+        FlagTune callers never select CUDA graphs, HIP graphs, streams, events,
+        or command buffers directly.  Each active Triton driver advertises its
+        replay capability and the shared resolver returns the actual protocol,
+        including an explicit event fallback when the backend has no equivalent
+        mechanism.
+        """
+        from triton.runtime.benchmark import resolve_benchmarker
+
+        return resolve_benchmarker(
+            mode,
+            warmup_ms=warmup_ms,
+            measurement_ms=measurement_ms,
+            n_retries=n_retries,
+        )
 
     def dtype(self, name: str) -> Any:
         """Resolve one validated dtype name from the lazily imported torch module."""

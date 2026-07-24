@@ -12,7 +12,7 @@ Outputs:
 Implementation:
     YAML parsing is intentionally operator agnostic: declared field names and
     row values are preserved and handed to the compiled data-driven shape
-    schema for semantic validation. JSONL uses grouped Schema v2 objects, while
+    schema for semantic validation. JSONL uses grouped Schema v3 objects, while
     CSV writes the equivalent dimensions and metrics as stable flat columns.
 
 Limitations:
@@ -32,7 +32,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from flag_gems.utils.flagtune.output_schema import (
+from flag_gems.flagtune.reporting.schema import (
     pretune_csv_fieldnames,
     pretune_csv_row,
     pretune_json_row,
@@ -226,7 +226,7 @@ def write_outputs(
         fixed reporting schema and compact JSON for nested shape/config values.
 
     Limitations:
-        Private worker keys are converted to public Schema v2 names. Missing
+        Private worker keys are converted to public Schema v3 names. Missing
         values become JSON nulls or empty CSV fields.
     """
     with (run_dir / "pretune.jsonl").open("w", encoding="utf-8") as handle:

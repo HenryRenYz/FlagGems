@@ -72,6 +72,8 @@ TUNING_RUN_MODES = (
 )
 DEFAULT_BENCHMARK_WARMUP_MS = 25
 DEFAULT_BENCHMARK_ITERATIONS_MS = 100
+DEFAULT_BENCHMARK_MODE = "replay"
+DEFAULT_BENCHMARK_RETRIES = 10
 DEFAULT_LATENCY_WARMUP_MS = 25
 DEFAULT_LATENCY_ITERATIONS_MS = 100
 DEFAULT_LATENCY_TRIALS = 3
@@ -125,8 +127,8 @@ def _prepare_tasks(
     """Convert user cases to indexed, JSON-serializable executor payloads."""
     if not shape_configs:
         raise BenchmarkError("shape_configs must contain at least one case")
-    from flag_gems.utils.flagtune.executor import prepare_benchmark_case
-    from flag_gems.utils.flagtune.operator_config import load_operator_benchmark_spec
+    from flag_gems.flagtune.runtime.executor import prepare_benchmark_case
+    from flag_gems.flagtune.contracts.operator import load_operator_benchmark_spec
 
     try:
         spec = load_operator_benchmark_spec(operator_config)
@@ -304,7 +306,7 @@ def _run_worker(args: argparse.Namespace) -> int:
     """
     os.environ["FLAGGEMS_DB_URL"] = args.database_url
 
-    from flag_gems.utils.flagtune.device_runtime import (
+    from flag_gems.flagtune.runtime.device import (
         probe_flagtune_environment,
     )
 
@@ -320,7 +322,7 @@ def _run_worker(args: argparse.Namespace) -> int:
             f"device, got {environment.device_count}"
         )
     environment.runtime.set_device(0)
-    from flag_gems.utils.flagtune.executor import (
+    from flag_gems.flagtune.runtime.executor import (
         BenchmarkWorker,
         describe_benchmark_case,
     )
@@ -338,6 +340,8 @@ def _run_worker(args: argparse.Namespace) -> int:
                     dtype_names=args.dtypes.split(","),
                     warmup=args.warmup,
                     iterations=args.iterations,
+                    benchmark_mode=args.benchmark_mode,
+                    benchmark_retries=args.benchmark_retries,
                     tuning_run_mode=args.tuning_run_mode,
                     latency_warmup=args.latency_warmup,
                     latency_iterations=args.latency_iterations,
@@ -389,6 +393,12 @@ def _worker_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dtypes", required=True)
     parser.add_argument("--warmup", type=int, required=True)
     parser.add_argument("--iterations", type=int, required=True)
+    parser.add_argument(
+        "--benchmark-mode",
+        choices=("event", "replay"),
+        required=True,
+    )
+    parser.add_argument("--benchmark-retries", type=int, required=True)
     parser.add_argument(
         "--tuning-run-mode",
         choices=TUNING_RUN_MODES,
@@ -480,6 +490,8 @@ def _launch_workers(
     dtypes: Sequence[str],
     warmup: int,
     iterations: int,
+    benchmark_mode: str,
+    benchmark_retries: int,
     tuning_run_mode: str,
     latency_warmup: int,
     latency_iterations: int,
@@ -499,6 +511,8 @@ def _launch_workers(
         dtype: Runtime tensor dtype name.
         warmup: Warmup duration/count forwarded to the executor.
         iterations: Measurement duration/count forwarded to the executor.
+        benchmark_mode: Architecture-neutral event/replay measurement.
+        benchmark_retries: Replay samples sharing the total measurement budget.
         tuning_run_mode: Explicit LibTuner config-selection behavior.
         latency_warmup: Fresh selected-config warmup milliseconds.
         latency_iterations: Fresh selected-config measurement milliseconds.
@@ -560,6 +574,10 @@ def _launch_workers(
             str(warmup),
             "--iterations",
             str(iterations),
+            "--benchmark-mode",
+            benchmark_mode,
+            "--benchmark-retries",
+            str(benchmark_retries),
             "--tuning-run-mode",
             tuning_run_mode,
             "--latency-warmup",
@@ -638,6 +656,8 @@ def run_shape_config_benchmarks(
     dtypes: Sequence[str] | str = "bfloat16",
     warmup: int = DEFAULT_BENCHMARK_WARMUP_MS,
     iterations: int = DEFAULT_BENCHMARK_ITERATIONS_MS,
+    benchmark_mode: str = DEFAULT_BENCHMARK_MODE,
+    benchmark_retries: int = DEFAULT_BENCHMARK_RETRIES,
     tuning_run_mode: str = "normal",
     latency_warmup: int = DEFAULT_LATENCY_WARMUP_MS,
     latency_iterations: int = DEFAULT_LATENCY_ITERATIONS_MS,
@@ -660,6 +680,11 @@ def run_shape_config_benchmarks(
         warmup: Non-negative candidate-config warmup duration in milliseconds.
         iterations: Positive candidate-config measurement duration in
             milliseconds.
+        benchmark_mode: Architecture-neutral ``event`` or ``replay`` timing.
+            Replay is requested by default and may explicitly fall back to
+            event timing at the backend capability boundary.
+        benchmark_retries: Positive replay sample count sharing the total
+            measurement budget.
         tuning_run_mode: ``normal``, ``force_policy``, or
             ``exhaustive_collection`` LibTuner config-selection behavior.
         latency_warmup: Non-negative fresh selected-config warmup milliseconds.
@@ -686,7 +711,7 @@ def run_shape_config_benchmarks(
         merges retain them and report their paths in the return value.
     """
 
-    from triton.flagtune.identity import normalize_dtype_name
+    from triton.flagtune.contract.identity import normalize_dtype_name
 
     requested = (
         [item.strip() for item in dtypes.split(",") if item.strip()]
@@ -703,6 +728,10 @@ def run_shape_config_benchmarks(
         raise BenchmarkError("warmup must be non-negative")
     if iterations <= 0:
         raise BenchmarkError("iterations must be positive")
+    if benchmark_mode not in ("event", "replay"):
+        raise BenchmarkError("benchmark_mode must be 'event' or 'replay'")
+    if benchmark_retries <= 0:
+        raise BenchmarkError("benchmark_retries must be positive")
     if tuning_run_mode not in TUNING_RUN_MODES:
         raise BenchmarkError(
             "tuning_run_mode must be one of "
@@ -715,7 +744,7 @@ def run_shape_config_benchmarks(
     if latency_trials <= 0:
         raise BenchmarkError("latency_trials must be positive")
     config_path = Path(operator_config).expanduser().resolve()
-    from flag_gems.utils.flagtune.operator_config import load_operator_benchmark_spec
+    from flag_gems.flagtune.contracts.operator import load_operator_benchmark_spec
 
     input_count = len(load_operator_benchmark_spec(config_path).benchmark.args)
     if len(requested) == 1:
@@ -728,7 +757,7 @@ def run_shape_config_benchmarks(
     work_path = Path(work_dir).expanduser().resolve()
     work_path.mkdir(parents=True, exist_ok=True)
 
-    from flag_gems.utils.flagtune.device_runtime import (
+    from flag_gems.flagtune.runtime.device import (
         probe_flagtune_environment,
     )
 
@@ -766,6 +795,8 @@ def run_shape_config_benchmarks(
         dtypes=requested,
         warmup=warmup,
         iterations=iterations,
+        benchmark_mode=benchmark_mode,
+        benchmark_retries=benchmark_retries,
         tuning_run_mode=tuning_run_mode,
         latency_warmup=latency_warmup,
         latency_iterations=latency_iterations,

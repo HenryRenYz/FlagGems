@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Compare two Pretune CSV artifacts and emit FlagTune Schema v2 results.
+"""Compare two Pretune CSV artifacts and emit FlagTune Schema v3 results.
 
-Both Schema v1 and v2 Pretune CSV inputs are accepted. Rows are joined by the
+Schema v1, v2, and v3 Pretune CSV inputs are accepted. Rows are joined by the
 original input row index and validated by named workload dimensions, so repeated
-shapes remain distinct. The output CSV is accompanied by a nested JSONL sibling.
-Derived metrics use full-precision inputs and are rounded only for serialization.
+shapes remain distinct. When protocol-aware v3 data is present, both inputs must
+use the exact same timing protocol; event and replay measurements are never
+silently mixed. The output CSV is accompanied by a nested JSONL sibling. Derived
+metrics use full-precision inputs and are rounded only for serialization.
 """
 
 from __future__ import annotations
@@ -23,7 +25,7 @@ SOURCE_ROOT = PROJECT_ROOT / "src"
 if str(SOURCE_ROOT) not in sys.path:
     sys.path.insert(0, str(SOURCE_ROOT))
 
-from flag_gems.utils.flagtune.output_schema import (
+from flag_gems.flagtune.reporting.schema import (
     SCHEMA_VERSION,
     format_derived,
     format_ms,
@@ -52,6 +54,20 @@ POLICY_COLUMNS = (
     "measured_count",
     "best_config",
     "error",
+)
+BENCHMARK_PROTOCOL_COLUMNS = (
+    "benchmark_requested_mode",
+    "benchmark_resolved_mode",
+    "benchmark_implementation",
+    "benchmark_cache_policy",
+    "benchmark_warmup_ms",
+    "benchmark_measurement_ms",
+    "benchmark_retries",
+    "benchmark_per_replay_ms",
+    "benchmark_fallback_reason",
+    "latency_warmup_ms",
+    "latency_measurement_ms",
+    "latency_trials",
 )
 V1_ALIASES = {
     "source_index": "input_row_index",
@@ -143,7 +159,7 @@ def _read_rows(path: Path, label: str) -> tuple[list[dict[str, str]], list[str]]
 def _normalize_schema(
     rows: Sequence[Mapping[str, str]], fieldnames: Sequence[str]
 ) -> tuple[list[dict[str, str]], list[str]]:
-    """Map a v1 or v2 Pretune CSV to canonical v2 input names."""
+    """Map a legacy Pretune CSV to the current canonical input names."""
     names = set(fieldnames)
     is_v2 = "input_row_index" in names
     if not is_v2 and "source_index" not in names:
@@ -231,6 +247,52 @@ def _validate_identity(
         )
 
 
+def _validate_protocol_schemas(
+    baseline_fields: Sequence[str], ours_fields: Sequence[str]
+) -> bool:
+    """Require complete protocol metadata on both inputs or on neither input."""
+    expected = set(BENCHMARK_PROTOCOL_COLUMNS)
+    baseline_present = expected.intersection(baseline_fields)
+    ours_present = expected.intersection(ours_fields)
+    if not baseline_present and not ours_present:
+        return False
+    if baseline_present != expected:
+        missing = sorted(expected - baseline_present)
+        raise ComparisonError(
+            "baseline CSV has incomplete benchmark protocol metadata: "
+            + ", ".join(missing)
+        )
+    if ours_present != expected:
+        missing = sorted(expected - ours_present)
+        raise ComparisonError(
+            "ours CSV has incomplete benchmark protocol metadata: "
+            + ", ".join(missing)
+        )
+    return True
+
+
+def _validate_protocol_identity(
+    input_row_index: int,
+    baseline: Mapping[str, str],
+    ours: Mapping[str, str],
+) -> None:
+    """Reject event/replay or timing-budget mismatches before deriving metrics."""
+    mismatches = [
+        name
+        for name in BENCHMARK_PROTOCOL_COLUMNS
+        if baseline.get(name, "") != ours.get(name, "")
+    ]
+    if mismatches:
+        details = ", ".join(
+            f"{name}={baseline.get(name)!r}/{ours.get(name)!r}"
+            for name in mismatches
+        )
+        raise ComparisonError(
+            f"input_row_index {input_row_index} benchmark protocol mismatch: "
+            f"{details}"
+        )
+
+
 def compare_rows(
     baseline_rows: Sequence[dict[str, str]],
     baseline_fields: Sequence[str],
@@ -254,6 +316,9 @@ def compare_rows(
         baseline_rows, baseline_fields
     )
     ours_rows, ours_fields = _normalize_schema(ours_rows, ours_fields)
+    protocol_aware = _validate_protocol_schemas(
+        baseline_fields, ours_fields
+    )
     required = [
         "input_row_index",
         "status",
@@ -279,6 +344,8 @@ def compare_rows(
         baseline = baseline_by_index[input_row_index]
         ours = ours_by_index[input_row_index]
         _validate_identity(input_row_index, baseline, ours, identity_columns)
+        if protocol_aware:
+            _validate_protocol_identity(input_row_index, baseline, ours)
         baseline_tuning = _parse_metric(baseline, tuning_column)
         ours_tuning = _parse_metric(ours, tuning_column)
         baseline_latency = _parse_metric(baseline, latency_column)
@@ -325,6 +392,13 @@ def compare_rows(
         ]
 
         output = {name: baseline.get(name, "") for name in copy_columns}
+        if protocol_aware:
+            output.update(
+                {
+                    name: baseline.get(name, "")
+                    for name in BENCHMARK_PROTOCOL_COLUMNS
+                }
+            )
         output["schema_version"] = str(SCHEMA_VERSION)
         output["baseline_tuning_time_ms"] = format_ms(baseline_tuning)
         output["ours_tuning_time_ms"] = format_ms(ours_tuning)
@@ -342,8 +416,9 @@ def compare_rows(
 
 
 def output_fieldnames(dimensions: Sequence[str]) -> list[str]:
-    """Return the stable flat Comparison CSV Schema v2 header."""
+    """Return the stable flat Comparison CSV Schema v3 header."""
     fields = ["schema_version", *_copy_columns(dimensions)]
+    fields.extend(BENCHMARK_PROTOCOL_COLUMNS)
     fields.extend(
         [
             "baseline_tuning_time_ms",
@@ -399,7 +474,7 @@ def _policy_json(row: Mapping[str, str], prefix: str) -> dict[str, Any]:
 def comparison_json_row(
     row: Mapping[str, str], dimensions: Sequence[str]
 ) -> dict[str, Any]:
-    """Convert one flat comparison result to nested JSONL Schema v2."""
+    """Convert one flat comparison result to nested JSONL Schema v3."""
     return {
         "schema_version": SCHEMA_VERSION,
         "input_row_index": int(row["input_row_index"]),
@@ -419,6 +494,28 @@ def comparison_json_row(
             "outputs": _json_value(row.get("output_dtypes"), []),
             "model_dtype_key": row.get("model_dtype_key") or None,
         },
+        "benchmark_protocol": {
+            "requested_mode": row.get("benchmark_requested_mode") or None,
+            "resolved_mode": row.get("benchmark_resolved_mode") or None,
+            "implementation": row.get("benchmark_implementation") or None,
+            "cache_policy": row.get("benchmark_cache_policy") or None,
+            "warmup_ms": _json_value(row.get("benchmark_warmup_ms")),
+            "measurement_ms": _json_value(
+                row.get("benchmark_measurement_ms")
+            ),
+            "n_retries": _json_value(row.get("benchmark_retries")),
+            "per_replay_ms": rounded_ms(
+                row.get("benchmark_per_replay_ms")
+            ),
+            "fallback_reason": row.get("benchmark_fallback_reason") or None,
+            "latency_warmup_ms": _json_value(
+                row.get("latency_warmup_ms")
+            ),
+            "latency_measurement_ms": _json_value(
+                row.get("latency_measurement_ms")
+            ),
+            "latency_trials": _json_value(row.get("latency_trials")),
+        },
         "baseline": _policy_json(row, "baseline"),
         "ours": _policy_json(row, "ours"),
         "comparison": {
@@ -433,7 +530,7 @@ def comparison_json_row(
 
 
 def write_comparison(path: Path, rows: Sequence[Mapping[str, str]]) -> Path:
-    """Write the v2 CSV and its same-stem nested JSONL sibling."""
+    """Write the v3 CSV and its same-stem nested JSONL sibling."""
     if path.suffix.lower() != ".csv":
         raise ComparisonError("--output must name a .csv file")
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -464,7 +561,7 @@ def write_comparison(path: Path, rows: Sequence[Mapping[str, str]]) -> Path:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
-    """Run CSV loading, comparison, and v2 artifact serialization."""
+    """Run CSV loading, comparison, and v3 artifact serialization."""
     args = build_parser().parse_args(argv)
     try:
         baseline_rows, baseline_fields = _read_rows(Path(args.baseline), "baseline")

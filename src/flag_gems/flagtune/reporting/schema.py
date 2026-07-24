@@ -1,4 +1,4 @@
-"""Serialize FlagTune Schema v2 artifacts consistently.
+"""Serialize FlagTune Schema v3 artifacts consistently.
 
 The execution layer intentionally keeps its private LibTuner-oriented names.
 This module is the single boundary that converts those raw worker records into
@@ -11,7 +11,7 @@ from __future__ import annotations
 import math
 from typing import Any, Mapping, Sequence
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 MILLISECOND_DIGITS = 6
 DERIVED_DIGITS = 3
 
@@ -82,7 +82,7 @@ def _dimensions(
 def pretune_json_row(
     row: Mapping[str, Any], shape_fields: Sequence[str]
 ) -> dict[str, Any]:
-    """Convert one private worker result to the public nested Schema v2 row."""
+    """Convert one private worker result to the public nested Schema v3 row."""
     config_search: dict[str, Any] = {
         "tuning_cache_hit": row.get("cache_hit"),
         "tuning_time_ms": rounded_ms(row.get("tuning_time_ms")),
@@ -124,6 +124,7 @@ def pretune_json_row(
             "status": row.get("status"),
             "error": row.get("error", ""),
             "first_call_ms": rounded_ms(row.get("first_call_ms")),
+            "benchmark_protocol": row.get("benchmark_protocol"),
             "latency_measurement": {
                 "source": row.get("latency_source"),
                 "warmup_ms": row.get("latency_warmup_ms"),
@@ -141,7 +142,7 @@ def pretune_json_row(
 
 
 def pretune_csv_fieldnames(shape_fields: Sequence[str]) -> list[str]:
-    """Return the stable flat Pretune CSV Schema v2 header."""
+    """Return the stable flat Pretune CSV Schema v3 header."""
     return [
         "schema_version",
         "input_row_index",
@@ -162,6 +163,15 @@ def pretune_csv_fieldnames(shape_fields: Sequence[str]) -> list[str]:
         "first_call_ms",
         "tuning_time_ms",
         "latency_source",
+        "benchmark_requested_mode",
+        "benchmark_resolved_mode",
+        "benchmark_implementation",
+        "benchmark_cache_policy",
+        "benchmark_warmup_ms",
+        "benchmark_measurement_ms",
+        "benchmark_retries",
+        "benchmark_per_replay_ms",
+        "benchmark_fallback_reason",
         "latency_warmup_ms",
         "latency_measurement_ms",
         "latency_trials",
@@ -180,8 +190,11 @@ def pretune_csv_fieldnames(shape_fields: Sequence[str]) -> list[str]:
 def pretune_csv_row(
     row: Mapping[str, Any], shape_fields: Sequence[str]
 ) -> dict[str, Any]:
-    """Convert one private worker result to the public flat CSV Schema v2 row."""
+    """Convert one private worker result to the public flat CSV Schema v3 row."""
     dimensions = _dimensions(row, shape_fields)
+    benchmark_protocol = row.get("benchmark_protocol")
+    if not isinstance(benchmark_protocol, Mapping):
+        benchmark_protocol = {}
     return {
         "schema_version": SCHEMA_VERSION,
         "input_row_index": row.get("source_index"),
@@ -202,6 +215,17 @@ def pretune_csv_row(
         "first_call_ms": format_ms(row.get("first_call_ms")),
         "tuning_time_ms": format_ms(row.get("tuning_time_ms")),
         "latency_source": row.get("latency_source"),
+        "benchmark_requested_mode": benchmark_protocol.get("requested_mode"),
+        "benchmark_resolved_mode": benchmark_protocol.get("resolved_mode"),
+        "benchmark_implementation": benchmark_protocol.get("implementation"),
+        "benchmark_cache_policy": benchmark_protocol.get("cache_policy"),
+        "benchmark_warmup_ms": benchmark_protocol.get("warmup_ms"),
+        "benchmark_measurement_ms": benchmark_protocol.get("measurement_ms"),
+        "benchmark_retries": benchmark_protocol.get("n_retries"),
+        "benchmark_per_replay_ms": format_ms(
+            benchmark_protocol.get("per_replay_ms")
+        ),
+        "benchmark_fallback_reason": benchmark_protocol.get("fallback_reason"),
         "latency_warmup_ms": row.get("latency_warmup_ms"),
         "latency_measurement_ms": row.get("latency_iterations_ms"),
         "latency_trials": row.get("latency_trial_count"),

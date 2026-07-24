@@ -46,9 +46,10 @@ import re
 import sys
 import time
 from dataclasses import dataclass, replace
+from decimal import Decimal, ROUND_FLOOR
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional, Sequence
+from typing import Any, Optional, Sequence, Union
 from urllib.parse import urlsplit, urlunsplit
 
 SCRIPT_PATH = Path(__file__).resolve()
@@ -57,9 +58,11 @@ SOURCE_ROOT = PROJECT_ROOT / "src"
 if str(SOURCE_ROOT) not in sys.path:
     sys.path.insert(0, str(SOURCE_ROOT))
 
-from flag_gems.utils.flagtune.benchmark import (
+from flag_gems.flagtune.collection.scheduler import (
     BenchmarkError,
     DEFAULT_BENCHMARK_ITERATIONS_MS,
+    DEFAULT_BENCHMARK_MODE,
+    DEFAULT_BENCHMARK_RETRIES,
     DEFAULT_BENCHMARK_WARMUP_MS,
     DEFAULT_LATENCY_ITERATIONS_MS,
     DEFAULT_LATENCY_TRIALS,
@@ -67,14 +70,14 @@ from flag_gems.utils.flagtune.benchmark import (
     parse_sqlite_url,
     run_shape_config_benchmarks,
 )
-from flag_gems.utils.flagtune.operator_config import (
+from flag_gems.flagtune.contracts.operator import (
     OperatorBenchmarkSpec,
     OperatorConfigError,
     initialize_planning_context,
     load_operator_benchmark_spec,
 )
-from flag_gems.utils.flagtune.records import PlanningContext, ShapeRecord
-from flag_gems.utils.flagtune.pretune_io import (
+from flag_gems.flagtune.contracts.records import PlanningContext, ShapeRecord
+from flag_gems.flagtune.reporting.artifacts import (
     PretuneIOError,
     combine_logs,
     load_shape_config,
@@ -83,7 +86,7 @@ from flag_gems.utils.flagtune.pretune_io import (
     write_manifest,
     write_outputs,
 )
-from flag_gems.utils.flagtune.output_schema import SCHEMA_VERSION
+from flag_gems.flagtune.reporting.schema import SCHEMA_VERSION
 
 DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "flagtune-pretune-output"
 STRATEGY_ENV_NAMES = (
@@ -168,6 +171,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Measurement milliseconds for each candidate config.",
     )
     parser.add_argument(
+        "--benchmark-mode",
+        choices=("replay", "event"),
+        default=DEFAULT_BENCHMARK_MODE,
+        help="Architecture-neutral candidate and selected-config timing mode.",
+    )
+    parser.add_argument(
+        "--benchmark-retries",
+        type=int,
+        default=DEFAULT_BENCHMARK_RETRIES,
+        help="Timed replay samples sharing each total measurement budget.",
+    )
+    parser.add_argument(
         "--latency-warmup",
         type=int,
         default=DEFAULT_LATENCY_WARMUP_MS,
@@ -186,7 +201,16 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_LATENCY_TRIALS,
         help="Independent fresh selected-config LibTuner trials.",
     )
-    parser.add_argument("--max-shapes", type=int, default=None)
+    parser.add_argument(
+        "--max-shapes",
+        type=parse_max_shapes,
+        default=None,
+        help=(
+            "Maximum selected shapes as a positive integer or percentage, "
+            "for example 50 or 50%%. Percentages are rounded down after "
+            "variant filtering."
+        ),
+    )
     parser.add_argument(
         "--sort",
         dest="sort_text",
@@ -212,14 +236,14 @@ def validate_args(args: argparse.Namespace) -> None:
         raise PretuneError("--warmup must be a non-negative integer")
     if args.iterations <= 0:
         raise PretuneError("--iter must be a positive integer")
+    if args.benchmark_retries <= 0:
+        raise PretuneError("--benchmark-retries must be a positive integer")
     if args.latency_warmup < 0:
         raise PretuneError("--latency-warmup must be a non-negative integer")
     if args.latency_iterations <= 0:
         raise PretuneError("--latency-iter must be a positive integer")
     if args.latency_trials <= 0:
         raise PretuneError("--latency-trials must be a positive integer")
-    if args.max_shapes is not None and args.max_shapes <= 0:
-        raise PretuneError("--max-shapes must be a positive integer")
 
 
 def parse_op(text: str) -> tuple[str, Optional[str]]:
@@ -249,6 +273,65 @@ def parse_sort(text: str) -> SortSpec:
     )
 
 
+def parse_max_shapes(text: str) -> Union[int, str]:
+    """Parse an absolute count or canonical percentage shape limit.
+
+    Values without ``%`` must be positive integers. Percentage values may use
+    a decimal fraction, must be greater than zero and at most 100, and remain
+    JSON-safe strings so dry-run plans and manifests preserve the user intent.
+    """
+    value = str(text).strip()
+    if value.endswith("%"):
+        number = value[:-1]
+        if not re.fullmatch(r"(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)", number):
+            raise argparse.ArgumentTypeError(
+                "--max-shapes percentage must look like 50% or 12.5%"
+            )
+        percentage = Decimal(number)
+        if percentage <= 0 or percentage > 100:
+            raise argparse.ArgumentTypeError(
+                "--max-shapes percentage must be greater than 0% and at most 100%"
+            )
+        return f"{format(percentage.normalize(), 'f')}%"
+    if not re.fullmatch(r"[0-9]+", value) or int(value) <= 0:
+        raise argparse.ArgumentTypeError(
+            "--max-shapes must be a positive integer or percentage"
+        )
+    return int(value)
+
+
+def resolve_max_shapes(max_shapes: Optional[Union[int, str]], total: int) -> int:
+    """Resolve a parsed shape limit against the post-filter shape count.
+
+    Percentage limits use floor rounding so the selected count never exceeds
+    the requested share. A percentage too small to select one shape is rejected
+    rather than silently producing an empty benchmark.
+    """
+    if total <= 0:
+        raise PretuneError("cannot resolve --max-shapes for an empty shape set")
+    if max_shapes is None:
+        return total
+    if isinstance(max_shapes, int):
+        if max_shapes <= 0:
+            raise PretuneError("--max-shapes must be positive")
+        return min(max_shapes, total)
+    parsed = parse_max_shapes(max_shapes)
+    if not isinstance(parsed, str):
+        return min(parsed, total)
+    percentage = Decimal(parsed[:-1])
+    selected = int(
+        (Decimal(total) * percentage / Decimal(100)).to_integral_value(
+            rounding=ROUND_FLOOR
+        )
+    )
+    if selected <= 0:
+        raise PretuneError(
+            f"--max-shapes {parsed} selects 0 of {total} eligible shapes; "
+            "use a larger percentage or an absolute count"
+        )
+    return selected
+
+
 def load_shape_records(path: Path, spec: OperatorBenchmarkSpec) -> list[ShapeRecord]:
     """Load generic YAML and validate rows through the compiled shape schema.
 
@@ -275,7 +358,7 @@ def select_shape_records(
     spec: OperatorBenchmarkSpec,
     requested_variant: Optional[str],
     sort_spec: SortSpec,
-    max_shapes: Optional[int],
+    max_shapes: Optional[Union[int, str]],
 ) -> list[ShapeRecord]:
     """Resolve variants, filter, sort, limit, and index shape records.
 
@@ -319,8 +402,7 @@ def select_shape_records(
         )
     elif sort_spec.mode == "random":
         random.Random(sort_spec.seed).shuffle(selected)
-    if max_shapes is not None:
-        selected = selected[:max_shapes]
+    selected = selected[: resolve_max_shapes(max_shapes, len(selected))]
     return [
         replace(record, selected_index=index) for index, record in enumerate(selected)
     ]
@@ -416,9 +498,12 @@ def dry_run_summary(
         },
         "sort": sort_spec.mode,
         "random_seed": sort_spec.seed,
+        "max_shapes": args.max_shapes,
         "dtypes": args.dtypes,
         "warmup": args.warmup,
         "iter": args.iterations,
+        "benchmark_mode": args.benchmark_mode,
+        "benchmark_retries": args.benchmark_retries,
         "tuning_run_mode": "force_policy",
         "latency_warmup": args.latency_warmup,
         "latency_iter": args.latency_iterations,
@@ -520,6 +605,8 @@ def run_main(args: argparse.Namespace) -> int:
             dtypes=args.dtypes,
             warmup=args.warmup,
             iterations=args.iterations,
+            benchmark_mode=args.benchmark_mode,
+            benchmark_retries=args.benchmark_retries,
             tuning_run_mode="force_policy",
             latency_warmup=args.latency_warmup,
             latency_iterations=args.latency_iterations,
@@ -533,6 +620,11 @@ def run_main(args: argparse.Namespace) -> int:
     except BenchmarkError as exc:
         raise PretuneError(str(exc)) from exc
     rows = batch.results
+    benchmark_protocols = {
+        json.dumps(protocol, sort_keys=True): protocol
+        for row in rows
+        if isinstance((protocol := row.get("benchmark_protocol")), dict)
+    }
     failed_rows = sum(row.get("status") != "ok" for row in rows)
     missing_rows = len(selected) - len(rows)
     write_outputs(run_dir, rows, spec.shape.identity)
@@ -594,6 +686,8 @@ def run_main(args: argparse.Namespace) -> int:
             "dtypes": args.dtypes,
             "warmup": args.warmup,
             "iter": args.iterations,
+            "benchmark_mode": args.benchmark_mode,
+            "benchmark_retries": args.benchmark_retries,
             "tuning_run_mode": "force_policy",
             "latency_warmup": args.latency_warmup,
             "latency_iter": args.latency_iterations,
@@ -624,6 +718,7 @@ def run_main(args: argparse.Namespace) -> int:
             "missing_row_count": missing_rows,
             "cached_count": cached_count,
             "measured_count": measured_count,
+            "resolved_protocols": list(benchmark_protocols.values()),
             "parallel": workers,
             "backend": context.backend_name,
             "visible_device_count": context.visible_device_count,

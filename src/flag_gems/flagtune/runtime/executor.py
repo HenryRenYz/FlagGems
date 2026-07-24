@@ -28,16 +28,16 @@ import time
 import traceback
 from typing import Any, Mapping, Optional, Sequence
 
-from triton.flagtune.expressions import evaluate_compiled
-from triton.flagtune.identity import make_dtype_key, normalize_dtype_name
+from triton.flagtune.contract.expressions import evaluate_compiled
+from triton.flagtune.contract.identity import make_dtype_key, normalize_dtype_name
 
-from .operator_config import (
+from ..contracts.operator import (
     OperatorBenchmarkSpec,
     OperatorConfigError,
     load_operator_benchmark_spec,
     resolve_public_operator,
 )
-from .records import ShapeRecord
+from ..contracts.records import ShapeRecord
 
 
 class BenchmarkExecutionError(RuntimeError):
@@ -379,7 +379,7 @@ class BenchmarkWorker:
         import triton
 
         import flag_gems
-        from flag_gems.utils.flagtune.device_runtime import (
+        from flag_gems.flagtune.runtime.device import (
             probe_flagtune_environment,
         )
 
@@ -603,6 +603,8 @@ class BenchmarkWorker:
         warmup: int,
         iterations: int,
         trials: int,
+        benchmark_mode: str,
+        benchmark_retries: int,
     ) -> tuple[float, float, float]:
         """Freshly benchmark one selected config through LibTuner.
 
@@ -618,6 +620,9 @@ class BenchmarkWorker:
             warmup: Triton warmup duration in milliseconds for every trial.
             iterations: Triton repetition duration in milliseconds per trial.
             trials: Positive number of independent LibTuner measurements.
+            benchmark_mode: Architecture-neutral event/replay timing mode.
+            benchmark_retries: Replay samples sharing each trial's measurement
+                budget.
 
         Returns:
             Median ``(p20, p50, p80)`` latency in milliseconds.
@@ -632,6 +637,8 @@ class BenchmarkWorker:
                 best_config,
                 warmup=warmup,
                 rep=iterations,
+                benchmark_mode=benchmark_mode,
+                benchmark_retries=benchmark_retries,
                 quantiles=(0.5, 0.2, 0.8),
             )
             trial_quantiles.append(
@@ -652,6 +659,8 @@ class BenchmarkWorker:
         dtype_names: Sequence[str],
         warmup: int,
         iterations: int,
+        benchmark_mode: str,
+        benchmark_retries: int,
         tuning_run_mode: str,
         latency_warmup: int,
         latency_iterations: int,
@@ -669,6 +678,10 @@ class BenchmarkWorker:
             warmup: Warmup milliseconds/iterations forwarded to Triton's
                 ``do_bench`` according to the installed Triton API.
             iterations: Measurement repetition setting forwarded as ``rep``.
+            benchmark_mode: Architecture-neutral ``event`` or ``replay``
+                measurement requested for candidate and selected-config timing.
+            benchmark_retries: Timed replay samples sharing each total
+                measurement budget.
             tuning_run_mode: Explicit LibTuner config-selection mode forwarded
                 by the worker scheduler.
             latency_warmup: Fresh selected-config warmup duration in milliseconds.
@@ -747,7 +760,6 @@ class BenchmarkWorker:
         tensors = self._make_tensors(values, torch_dtypes)
         self.device_runtime.synchronize()
         first_start = time.perf_counter()
-        original_do_bench = tuner.do_bench
         progress_interval = _progress_interval()
         measured_configs = 0
         progress_start = time.perf_counter()
@@ -755,53 +767,56 @@ class BenchmarkWorker:
             print(
                 f"worker={worker_id} case={describe_benchmark_case(payload)} "
                 f"config_benchmark_start candidates={len(active_configs)} "
-                f"warmup={warmup} iter={iterations}",
+                f"benchmark_mode={benchmark_mode} warmup={warmup} "
+                f"iter={iterations} retries={benchmark_retries}",
                 flush=True,
             )
-
-        def configured_do_bench(kernel_call: Any, quantiles: Any) -> Any:
-            """Benchmark one candidate with requested settings and report progress."""
-            nonlocal measured_configs
-            try:
-                return self._triton_module.testing.do_bench(
-                    kernel_call,
-                    warmup=warmup,
-                    rep=iterations,
-                    quantiles=quantiles,
-                )
-            finally:
-                measured_configs += 1
-                should_report = (
-                    config_records is not None
-                    and progress_interval > 0
-                    and (
-                        measured_configs == 1
-                        or measured_configs % progress_interval == 0
-                        or measured_configs == len(active_configs)
-                    )
-                )
-                if should_report:
-                    elapsed = max(time.perf_counter() - progress_start, 1e-9)
-                    rate = measured_configs / elapsed
-                    remaining = max(len(active_configs) - measured_configs, 0)
-                    eta = remaining / rate if rate > 0 else float("inf")
-                    print(
-                        f"worker={worker_id} case={describe_benchmark_case(payload)} "
-                        f"config_progress={measured_configs}/{len(active_configs)} "
-                        f"rate={rate:.2f}_config/s eta={eta:.1f}s",
-                        flush=True,
-                    )
 
         # Both exhaustive Train and policy-forced Pretune use the public CLI
         # settings for any candidate cache miss. Pretune then performs its
         # separate fresh selected-config measurement with --latency-*.
-        tuner.do_bench = configured_do_bench
-        try:
-            with tuner.use_benchmark_protocol(warmup, iterations):
+        with tuner.use_benchmark_protocol(
+            benchmark_mode,
+            warmup,
+            iterations,
+            benchmark_retries,
+        ) as resolved_protocol:
+            protocol_benchmark = tuner.do_bench
+
+            def configured_do_bench(kernel_call: Any, quantiles: Any) -> Any:
+                """Benchmark one candidate with requested settings and report progress."""
+                nonlocal measured_configs
+                try:
+                    return protocol_benchmark(kernel_call, quantiles)
+                finally:
+                    measured_configs += 1
+                    should_report = (
+                        config_records is not None
+                        and progress_interval > 0
+                        and (
+                            measured_configs == 1
+                            or measured_configs % progress_interval == 0
+                            or measured_configs == len(active_configs)
+                        )
+                    )
+                    if should_report:
+                        elapsed = max(time.perf_counter() - progress_start, 1e-9)
+                        rate = measured_configs / elapsed
+                        remaining = max(len(active_configs) - measured_configs, 0)
+                        eta = remaining / rate if rate > 0 else float("inf")
+                        print(
+                            f"worker={worker_id} case={describe_benchmark_case(payload)} "
+                            f"config_progress={measured_configs}/{len(active_configs)} "
+                            f"rate={rate:.2f}_config/s eta={eta:.1f}s",
+                            flush=True,
+                        )
+
+            tuner.do_bench = configured_do_bench
+            try:
                 with tuner.use_run_mode(selected_run_mode):
                     output = self._invoke(tensors)
-        finally:
-            tuner.do_bench = original_do_bench
+            finally:
+                tuner.do_bench = protocol_benchmark
         self.device_runtime.synchronize()
         first_call_ms = (time.perf_counter() - first_start) * 1000.0
         best_config = getattr(tuner, "best_config", None)
@@ -845,6 +860,8 @@ class BenchmarkWorker:
                 warmup=latency_warmup,
                 iterations=latency_iterations,
                 trials=latency_trials,
+                benchmark_mode=benchmark_mode,
+                benchmark_retries=benchmark_retries,
             )
             latency_source = "libtuner_selected_config_fresh"
             reported_latency_trials = latency_trials
@@ -899,6 +916,7 @@ class BenchmarkWorker:
                 iterations if config_records is not None else latency_iterations
             ),
             "latency_trial_count": reported_latency_trials,
+            "benchmark_protocol": resolved_protocol.as_dict(),
             "candidate_config_count": len(active_configs),
             "timed_config_count": timed_config_count,
             "benchmark_cache_hit_count": benchmark_cache_hit_count,
@@ -967,6 +985,7 @@ class BenchmarkWorker:
             "latency_warmup_ms": None,
             "latency_iterations_ms": None,
             "latency_trial_count": None,
+            "benchmark_protocol": None,
             "candidate_config_count": len(configs) if configs is not None else None,
             "timed_config_count": None,
             "benchmark_cache_hit_count": None,

@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
 
-from triton.flagtune.expressions import (
+from triton.flagtune.contract.expressions import (
     CompiledExpression,
     SafeExpressionError,
     SymbolRef,
@@ -379,7 +379,7 @@ class OperatorBenchmarkSpec:
 def public_operator_name(op_id: str) -> str:
     """Resolve a FlagGems public callable name without YAML-provided imports."""
     try:
-        from triton.flagtune.registry import validate_op_id
+        from triton.flagtune.contract.operator_schema import validate_op_id
 
         validated = validate_op_id(op_id)
     except (ImportError, TypeError, ValueError) as exc:
@@ -685,7 +685,7 @@ def load_operator_benchmark_spec(path: str | Path) -> OperatorBenchmarkSpec:
     if root.get("schema_version") != 3:
         raise OperatorConfigError("config.schema_version must be 3")
     try:
-        from triton.flagtune.registry import parse_operator_config
+        from triton.flagtune.contract.operator_schema import parse_operator_config
 
         operator_info = parse_operator_config(
             {"op_id": root.get("op_id"), "variants": root.get("variants")}
@@ -764,7 +764,7 @@ def initialize_planning_context(
         import triton
 
         import flag_gems
-        from flag_gems.utils.flagtune.device_runtime import (
+        from flag_gems.flagtune.runtime.device import (
             probe_flagtune_environment,
         )
         from flag_gems.runtime.backend import _state

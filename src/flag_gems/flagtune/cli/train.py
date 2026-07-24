@@ -49,32 +49,35 @@ SOURCE_ROOT = PROJECT_ROOT / "src"
 if str(SOURCE_ROOT) not in sys.path:
     sys.path.insert(0, str(SOURCE_ROOT))
 
-from flag_gems.utils.flagtune.benchmark import (  # noqa: E402
+from flag_gems.flagtune.collection.scheduler import (  # noqa: E402
     BenchmarkError,
     DEFAULT_BENCHMARK_ITERATIONS_MS,
+    DEFAULT_BENCHMARK_MODE,
+    DEFAULT_BENCHMARK_RETRIES,
     DEFAULT_BENCHMARK_WARMUP_MS,
     run_shape_config_benchmarks,
 )
-from flag_gems.utils.flagtune.operator_config import (  # noqa: E402
+from flag_gems.flagtune.contracts.operator import (  # noqa: E402
     OperatorConfigError,
     initialize_planning_context,
     load_operator_benchmark_spec,
 )
-from flag_gems.utils.flagtune.output_schema import (  # noqa: E402
+from flag_gems.flagtune.reporting.schema import (  # noqa: E402
     SCHEMA_VERSION,
     pretune_json_row,
     rounded_ms,
 )
-from flag_gems.utils.flagtune.pretune import (  # noqa: E402
+from flag_gems.flagtune.cli.pretune import (  # noqa: E402
     PretuneError,
     environment_snapshot,
     load_shape_records,
+    parse_max_shapes,
     parse_sort,
     sanitize_db_url,
     select_shape_records,
     visible_device_tokens,
 )
-from flag_gems.utils.flagtune.pretune_io import (  # noqa: E402
+from flag_gems.flagtune.reporting.artifacts import (  # noqa: E402
     make_run_dir,
     PretuneIOError,
     remove_intermediate_artifacts,
@@ -165,7 +168,28 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_BENCHMARK_ITERATIONS_MS,
         help="Measurement milliseconds for each config.",
     )
-    parser.add_argument("--max-shapes", type=int, default=None)
+    parser.add_argument(
+        "--benchmark-mode",
+        choices=("replay", "event"),
+        default=DEFAULT_BENCHMARK_MODE,
+        help="Architecture-neutral config timing mode.",
+    )
+    parser.add_argument(
+        "--benchmark-retries",
+        type=int,
+        default=DEFAULT_BENCHMARK_RETRIES,
+        help="Timed replay samples sharing the total --iter budget.",
+    )
+    parser.add_argument(
+        "--max-shapes",
+        type=parse_max_shapes,
+        default=None,
+        help=(
+            "Maximum selected shapes as a positive integer or percentage, "
+            "for example 50 or 50%%. Percentages are rounded down after "
+            "variant filtering."
+        ),
+    )
     parser.add_argument(
         "--sort",
         dest="sort_text",
@@ -242,8 +266,9 @@ def validate_args(args: argparse.Namespace) -> None:
         raise TrainError("--warmup must be non-negative")
     if args.iterations <= 0:
         raise TrainError("--iter must be positive")
+    if args.benchmark_retries <= 0:
+        raise TrainError("--benchmark-retries must be positive")
     for name in (
-        "max_shapes",
         "shape_batch_size",
         "n_estimators",
         "max_depth",
@@ -267,7 +292,7 @@ def validate_args(args: argparse.Namespace) -> None:
     if not args.variant.strip() or "/" in args.variant:
         raise TrainError("--variant must be a non-empty single-segment name")
     try:
-        from triton.flagtune.artifacts import validate_model_version
+        from triton.flagtune.contract.archive import validate_model_version
 
         validate_model_version(args.model_version)
     except (ImportError, ValueError) as exc:
@@ -488,6 +513,7 @@ def _append_collection_rows(
                         "name": result.get("gpu_name"),
                         "metadata": result.get("gpu_metadata"),
                     },
+                    "benchmark_protocol": result.get("benchmark_protocol"),
                     "inputs": inputs,
                     "config_order": config_order,
                     **serialized_timing,
@@ -510,7 +536,7 @@ def _training_options(args: argparse.Namespace) -> Any:
     Importing the FlagTree training module is delayed until collection planning
     is complete, keeping ``--help`` and early argument errors lightweight.
     """
-    from triton.flagtune.training import XGBoostTrainingOptions
+    from triton.flagtune.training.ranker import XGBoostTrainingOptions
 
     return XGBoostTrainingOptions(
         n_estimators=args.n_estimators,
@@ -614,6 +640,7 @@ def run_main(args: argparse.Namespace) -> int:
         "variant": requested_variant,
         "model_version": args.model_version,
         "selected_shape_count": len(selected),
+        "max_shapes": args.max_shapes,
         "config_count_per_shape": len(configs),
         "expected_benchmark_row_count": expected_rows,
         "feature_count": len(variant_info.feature_names),
@@ -631,6 +658,8 @@ def run_main(args: argparse.Namespace) -> int:
         "dtypes": args.dtypes,
         "warmup": args.warmup,
         "iter": args.iterations,
+        "benchmark_mode": args.benchmark_mode,
+        "benchmark_retries": args.benchmark_retries,
         "flagtree_aabs": False,
         "tuning_run_mode": "exhaustive_collection",
         "sort": sort_spec.mode,
@@ -653,6 +682,7 @@ def run_main(args: argparse.Namespace) -> int:
     failed_shapes = 0
     benchmark_cache_hits = 0
     benchmark_successes = 0
+    benchmark_protocols: dict[str, Mapping[str, Any]] = {}
     batch_manifests = []
     gpu_keys: set[str] = set()
     dtype_keys: set[str] = set()
@@ -689,6 +719,8 @@ def run_main(args: argparse.Namespace) -> int:
                     dtypes=args.dtypes,
                     warmup=args.warmup,
                     iterations=args.iterations,
+                    benchmark_mode=args.benchmark_mode,
+                    benchmark_retries=args.benchmark_retries,
                     tuning_run_mode="exhaustive_collection",
                     parallel=batch_workers,
                     gpu_tokens=gpu_tokens[:batch_workers],
@@ -702,6 +734,11 @@ def run_main(args: argparse.Namespace) -> int:
             for result in batch.results:
                 if result.get("status") != "ok":
                     continue
+                protocol = result.get("benchmark_protocol")
+                if isinstance(protocol, Mapping):
+                    benchmark_protocols[json.dumps(protocol, sort_keys=True)] = dict(
+                        protocol
+                    )
                 gpu_keys.add(str(result.get("gpu_key")))
                 dtype_keys.add(str(result.get("dtype_key")))
                 current_dtypes = [
@@ -793,9 +830,9 @@ def run_main(args: argparse.Namespace) -> int:
         )
 
     try:
-        from triton.flagtune.identity import ModelIdentity
-        from triton.flagtune.registry import model_config_sha256
-        from triton.flagtune.training import export_ranker_model, train_xgboost_ranker
+        from triton.flagtune.contract.identity import ModelIdentity
+        from triton.flagtune.contract.operator_schema import model_config_sha256
+        from triton.flagtune.training.ranker import export_ranker_model, train_xgboost_ranker
 
         options = _training_options(args)
         _status(
@@ -803,6 +840,10 @@ def run_main(args: argparse.Namespace) -> int:
             f"trees={args.n_estimators}, max_depth={args.max_depth}"
         )
         model, training_summary = train_xgboost_ranker(variant_info, data_path, options)
+        training_summary = {
+            **training_summary,
+            "benchmark_protocols": list(benchmark_protocols.values()),
+        }
         if (
             not gpu_keys
             or not dtype_keys
@@ -864,6 +905,8 @@ def run_main(args: argparse.Namespace) -> int:
             "dtypes": args.dtypes,
             "warmup": args.warmup,
             "iter": args.iterations,
+            "benchmark_mode": args.benchmark_mode,
+            "benchmark_retries": args.benchmark_retries,
             "database": sanitize_db_url(database_url),
             "database_path": str(database_path),
             "database_source": database_source,
@@ -891,6 +934,7 @@ def run_main(args: argparse.Namespace) -> int:
             "failed_shape_count": failed_shapes,
             "cached_count": benchmark_cache_hits,
             "measured_count": benchmark_successes,
+            "resolved_protocols": list(benchmark_protocols.values()),
             "parallel": workers,
             "gpu_tokens": gpu_tokens,
             "shape_batch_size": shape_batch_size,

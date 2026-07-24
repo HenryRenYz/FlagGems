@@ -21,6 +21,7 @@ import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -728,7 +729,7 @@ def test_benchmark_success_count_tracks_finite_uncached_benchmarks(monkeypatch):
     assert tuner._run_mode is LibTunerRunMode.NORMAL
 
 
-def test_benchmark_key_preserves_raw_shape_and_scopes_timing_protocol():
+def test_benchmark_key_preserves_raw_shape_and_scopes_timing_protocol(monkeypatch):
     """Keep ConfigCache bucketing while separating exact benchmark labels."""
 
     class FakeTuner:
@@ -737,8 +738,40 @@ def test_benchmark_key_preserves_raw_shape_and_scopes_timing_protocol():
         keys = ["M"]
         strategy = [libentry_mod.align32_strategy]
         _benchmark_protocol = ("triton_do_bench", 5, 20)
+        benchmark_protocol = None
+        _benchmark_retries = 10
+        do_bench = staticmethod(lambda _call, _quantiles: None)
+        config_table_name = "fake_config"
+        cache = object()
+
+        @staticmethod
+        def _make_config_table_name():
+            return "fake_scoped_config"
 
     tuner = FakeTuner()
+    scoped_protocol = libentry_mod.BenchmarkProtocol(
+        requested_mode=libentry_mod.BenchmarkMode.REPLAY,
+        resolved_mode=libentry_mod.BenchmarkMode.REPLAY,
+        implementation="fake_replay_v1",
+        cache_policy="warm_l2",
+        warmup_ms=25,
+        measurement_ms=100,
+        n_retries=10,
+        per_replay_ms=10.0,
+    )
+    monkeypatch.setattr(
+        libentry_mod,
+        "resolve_benchmarker",
+        lambda *args, **kwargs: SimpleNamespace(
+            protocol=scoped_protocol,
+            benchmark=lambda _call, _quantiles: None,
+        ),
+    )
+    class FakeScopedLibCache:
+        def __getitem__(self, _key):
+            return object()
+
+    monkeypatch.setattr(libentry_mod, "libcache", FakeScopedLibCache())
     assert LibTuner.get_key(tuner, {"M": 33}) == (64,)
     assert LibTuner.get_key(tuner, {"M": 63}) == (64,)
     assert LibTuner.get_benchmark_key(tuner, {"M": 33}) == (
@@ -754,14 +787,124 @@ def test_benchmark_key_preserves_raw_shape_and_scopes_timing_protocol():
         20,
     )
 
-    with LibTuner.use_benchmark_protocol(tuner, 25, 100):
+    with LibTuner.use_benchmark_protocol(tuner, "replay", 25, 100, 10):
         assert LibTuner.get_benchmark_key(tuner, {"M": 33}) == (
             33,
-            "triton_do_bench",
+            "fake_replay_v1",
             25,
             100,
+            10,
+            10.0,
         )
     assert tuner._benchmark_protocol == ("triton_do_bench", 5, 20)
+    assert tuner.benchmark_protocol is None
+    assert tuner._benchmark_retries == 10
+    assert tuner.config_table_name == "fake_config"
+
+
+@pytest.mark.parametrize(
+    ("use_cuda_graph", "expected"),
+    [(True, libentry_mod.BenchmarkMode.REPLAY), (False, libentry_mod.BenchmarkMode.EVENT)],
+)
+def test_deprecated_cuda_graph_alias_maps_to_benchmark_mode(use_cuda_graph, expected):
+    """Keep the legacy boolean API while making replay the implicit default."""
+    with pytest.warns(DeprecationWarning, match="use_cuda_graph is deprecated"):
+        assert libentry_mod._select_benchmark_mode(None, use_cuda_graph) is expected
+
+    assert (
+        libentry_mod._select_benchmark_mode(None, None)
+        is libentry_mod.BenchmarkMode.REPLAY
+    )
+    with pytest.raises(ValueError, match="cannot be supplied together"):
+        libentry_mod._select_benchmark_mode("event", False)
+
+
+@pytest.mark.parametrize("value", [0, -1, True, 1.5])
+def test_benchmark_retries_rejects_invalid_legacy_protocol_values(value):
+    """Avoid legacy replay division-by-zero before Triton resolves a benchmarker."""
+    with pytest.raises(ValueError, match="positive integer"):
+        libentry_mod._validate_benchmark_retries(value)
+
+
+def test_replay_fallback_reuses_event_config_cache_namespace(monkeypatch):
+    """Use the historical event cache when replay resolution falls back to event."""
+
+    event_protocol = libentry_mod.BenchmarkProtocol(
+        requested_mode=libentry_mod.BenchmarkMode.REPLAY,
+        resolved_mode=libentry_mod.BenchmarkMode.EVENT,
+        implementation="triton_do_bench",
+        cache_policy="cold_l2",
+        warmup_ms=25,
+        measurement_ms=100,
+        n_retries=1,
+        per_replay_ms=None,
+        fallback_reason="fake backend has no replay benchmarker",
+    )
+    monkeypatch.setattr(
+        libentry_mod,
+        "resolve_benchmarker",
+        lambda *args, **kwargs: SimpleNamespace(
+            protocol=event_protocol, benchmark=lambda _call, _quantiles: None
+        ),
+    )
+
+    class FakeCache:
+        def __getitem__(self, _key):
+            return object()
+
+    class FakeTuner:
+        kernel_hash = "kernel"
+        _benchmark_protocol = ("triton_do_bench", 25, 100)
+        benchmark_protocol = None
+        _benchmark_retries = 10
+        do_bench = staticmethod(lambda _call, _quantiles: None)
+        config_table_name = "mm_kernel"
+        cache = object()
+        _make_config_table_name = LibTuner._make_config_table_name
+
+    monkeypatch.setattr(libentry_mod, "libcache", FakeCache())
+    tuner = FakeTuner()
+    tuner.__name__ = "mm"
+    with LibTuner.use_benchmark_protocol(tuner, "replay", 25, 100, 10) as protocol:
+        assert protocol is event_protocol
+        assert tuner.config_table_name == "mm_kernel"
+        assert tuner.benchmark_protocol is event_protocol
+    assert tuner.config_table_name == "mm_kernel"
+    assert tuner.benchmark_protocol is None
+
+
+def test_config_cache_namespace_separates_replay_protocols():
+    """Preserve the legacy event table while isolating replay timing choices."""
+
+    class FakeTuner:
+        pass
+
+    tuner = FakeTuner()
+    tuner.__name__ = "mm"
+    tuner.kernel_hash = "kernel"
+    tuner._benchmark_protocol = ("triton_do_bench", 25, 100)
+    assert LibTuner._make_config_table_name(tuner) == "mm_kernel"
+
+    tuner._benchmark_protocol = (
+        "triton_cuda_graph_replay_v1",
+        25,
+        100,
+        10,
+        10.0,
+    )
+    replay_ten = LibTuner._make_config_table_name(tuner)
+    tuner._benchmark_protocol = (
+        "triton_cuda_graph_replay_v1",
+        25,
+        100,
+        5,
+        20.0,
+    )
+    replay_five = LibTuner._make_config_table_name(tuner)
+
+    assert replay_ten.startswith("mm_kernel_benchmark_")
+    assert replay_five.startswith("mm_kernel_benchmark_")
+    assert replay_ten != replay_five
 
 
 def test_benchmark_config_reuses_kernel_context_and_bypasses_caches(monkeypatch):
@@ -769,15 +912,36 @@ def test_benchmark_config_reuses_kernel_context_and_bypasses_caches(monkeypatch)
     config = triton.Config({"BLOCK": 16})
     observed = {}
 
-    def fake_triton_do_bench(kernel_call, *, warmup, rep, quantiles):
-        """Capture the authoritative timing options and execute the fake kernel."""
-        observed["warmup"] = warmup
-        observed["rep"] = rep
-        observed["quantiles"] = quantiles
-        observed["launch"] = kernel_call()
-        return [1.0, 0.8, 1.2]
+    protocol = libentry_mod.BenchmarkProtocol(
+        requested_mode=libentry_mod.BenchmarkMode.EVENT,
+        resolved_mode=libentry_mod.BenchmarkMode.EVENT,
+        implementation="triton_do_bench",
+        cache_policy="cold_l2",
+        warmup_ms=200,
+        measurement_ms=500,
+        n_retries=1,
+        per_replay_ms=None,
+    )
 
-    monkeypatch.setattr(triton.testing, "do_bench", fake_triton_do_bench)
+    def fake_resolve(mode, *, warmup_ms, measurement_ms, n_retries):
+        observed["mode"] = str(mode)
+        observed["warmup"] = warmup_ms
+        observed["rep"] = measurement_ms
+        observed["retries"] = n_retries
+
+        def benchmark(kernel_call, quantiles):
+            observed["quantiles"] = quantiles
+            observed["launch"] = kernel_call()
+            return [1.0, 0.8, 1.2]
+
+        return SimpleNamespace(protocol=protocol, benchmark=benchmark)
+
+    monkeypatch.setattr(libentry_mod, "resolve_benchmarker", fake_resolve)
+    class FakeScopedLibCache:
+        def __getitem__(self, _key):
+            return object()
+
+    monkeypatch.setattr(libentry_mod, "libcache", FakeScopedLibCache())
 
     class FakeTuner:
         """Provide the retained context and _bench protocol used by the API."""
@@ -787,6 +951,16 @@ def test_benchmark_config_reuses_kernel_context_and_bypasses_caches(monkeypatch)
         arg_names = ["descriptor_arg"]
         nargs = None
         seen_tuned_metas = {"stale": [9.0, 9.0, 9.0]}
+        benchmark_protocol = protocol
+        _benchmark_protocol = protocol.cache_key()
+        _benchmark_retries = 10
+        config_table_name = "fake_config"
+        cache = object()
+        use_benchmark_protocol = LibTuner.use_benchmark_protocol
+
+        @staticmethod
+        def _make_config_table_name():
+            return "fake_scoped_config"
 
         def __init__(self):
             """Install a sentinel benchmarker that must be restored."""
@@ -811,6 +985,7 @@ def test_benchmark_config_reuses_kernel_context_and_bypasses_caches(monkeypatch)
         config,
         warmup=200,
         rep=500,
+        benchmark_mode="event",
         quantiles=(0.2, 0.5, 0.8),
     )
 
@@ -821,8 +996,10 @@ def test_benchmark_config_reuses_kernel_context_and_bypasses_caches(monkeypatch)
         "meta": {"M": 32},
         "nargs": {"descriptor_arg": "descriptor"},
         "seen_tuned_metas": {},
+        "mode": "BenchmarkMode.EVENT",
         "warmup": 200,
         "rep": 500,
+        "retries": 10,
         "quantiles": (0.2, 0.5, 0.8),
         "launch": "kernel-launched",
     }
@@ -837,7 +1014,7 @@ def test_benchmark_config_reuses_kernel_context_and_bypasses_caches(monkeypatch)
 def test_hopper_mm_config_compiles_without_runtime_registration():
     """Compile all training variants and verify canonical kernel pair bindings."""
     mm_ops = importlib.import_module("flag_gems.runtime.backend._nvidia.hopper.ops.mm")
-    from flag_gems.utils.flagtune import operator_config as operator_config_mod
+    from flag_gems.flagtune.contracts import operator as operator_config_mod
 
     spec = operator_config_mod.load_operator_benchmark_spec(
         os.path.join(

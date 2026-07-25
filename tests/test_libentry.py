@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import importlib
+import importlib.util
 import multiprocessing
 import os
 import signal
@@ -42,6 +43,7 @@ from flag_gems.utils.libentry import (
 
 libentry_mod = importlib.import_module("flag_gems.utils.libentry")
 flagtune_runtime_mod = importlib.import_module("flag_gems.runtime.flagtune")
+HAS_FLAGTREE_FLAGTUNE = importlib.util.find_spec("triton.flagtune") is not None
 
 
 # not_raises is copied from https://gist.github.com/oisinmulvihill/45c14271fad7794a4a52516ecb784e69
@@ -55,6 +57,20 @@ def not_raises(ExpectedException):
 
     except Exception as error:
         raise AssertionError(f"An unexpected exception {error} raised.")
+
+
+def test_legacy_expanded_flagtune_environment_aliases(monkeypatch):
+    """Retain FlagGems expanded-search behavior for both legacy aliases."""
+    monkeypatch.setattr(flagtune_runtime_mod, "_include_ops", None)
+    monkeypatch.delenv("FLAGGEMS_FLAGTUNE_EXPANDED", raising=False)
+    monkeypatch.delenv("FLAGGEMS_FLAGTUNE_INCLUDE", raising=False)
+    monkeypatch.setenv("USE_FLAGTUNE", "1")
+
+    assert flagtune_runtime_mod.flagtune_enabled("mm") is True
+
+    monkeypatch.delenv("USE_FLAGTUNE", raising=False)
+    monkeypatch.setenv("FLAGTUNE_INCLUDE", "mm")
+    assert flagtune_runtime_mod.flagtune_enabled("mm") is True
 
 
 def softmax_inner_decorator_cascade(x, dim, dtype=None):
@@ -371,8 +387,8 @@ def test_hash_changes_when_dependency_modified():
     )
 
 
-def test_flagtree_policy_is_bypassed_when_use_flagtune_is_enabled(monkeypatch):
-    """Use exhaustive legacy tuning and avoid the proposer when USE_FLAGTUNE is set."""
+def test_flagtree_policy_is_bypassed_when_expanded_flagtune_is_enabled(monkeypatch):
+    """Use exhaustive legacy tuning when expanded FlagTune is enabled."""
     configs = [
         triton.Config({"BLOCK": 4}),
         triton.Config({"BLOCK": 2}),
@@ -394,7 +410,7 @@ def test_flagtree_policy_is_bypassed_when_use_flagtune_is_enabled(monkeypatch):
         called = True
         raise AssertionError("FlagTree proposer should not be used")
 
-    monkeypatch.setenv("USE_FLAGTUNE", "1")
+    monkeypatch.setenv("FLAGGEMS_FLAGTUNE_EXPANDED", "1")
     monkeypatch.setattr(libentry_mod, "_ensure_flagtune_proposer", fail_if_called)
 
     best_config, timings = LibTuner.get("flagtune").policy(
@@ -454,9 +470,11 @@ def test_flagtree_policy_is_default_when_use_flagtune_is_disabled(monkeypatch):
         proposer_called = True
         return [{"BLOCK": 1}]
 
+    monkeypatch.delenv("FLAGGEMS_FLAGTUNE_EXPANDED", raising=False)
+    monkeypatch.delenv("FLAGGEMS_FLAGTUNE_INCLUDE", raising=False)
     monkeypatch.delenv("USE_FLAGTUNE", raising=False)
     monkeypatch.delenv("FLAGTUNE_INCLUDE", raising=False)
-    monkeypatch.setenv("TRITON_USE_FLAGTUNE", "1")
+    monkeypatch.setenv("FLAGTUNE_ENABLE", "1")
     monkeypatch.setattr(flagtune_runtime_mod, "_include_ops", None)
     monkeypatch.setattr(libentry_mod, "_flagtune_available", lambda: (True, None))
     monkeypatch.setattr(libentry_mod, "_flagtune_enabled", lambda: True)
@@ -493,9 +511,11 @@ def test_flagtree_policy_is_bypassed_when_triton_flagtune_is_disabled(monkeypatc
         called = True
         raise AssertionError("disabled FlagTree proposer should not be loaded")
 
+    monkeypatch.delenv("FLAGGEMS_FLAGTUNE_EXPANDED", raising=False)
+    monkeypatch.delenv("FLAGGEMS_FLAGTUNE_INCLUDE", raising=False)
     monkeypatch.delenv("USE_FLAGTUNE", raising=False)
     monkeypatch.delenv("FLAGTUNE_INCLUDE", raising=False)
-    monkeypatch.delenv("TRITON_USE_FLAGTUNE", raising=False)
+    monkeypatch.delenv("FLAGTUNE_ENABLE", raising=False)
     monkeypatch.setattr(flagtune_runtime_mod, "_include_ops", None)
     monkeypatch.setattr(libentry_mod, "_flagtune_available", lambda: (True, None))
     monkeypatch.setattr(libentry_mod, "_flagtune_enabled", lambda: False)
@@ -1011,8 +1031,8 @@ def test_benchmark_config_reuses_kernel_context_and_bypasses_caches(monkeypatch)
 
 
 @pytest.mark.skipif(
-    flag_gems.vendor_name != "nvidia",
-    reason="The config covers NVIDIA Hopper mm kernels.",
+    flag_gems.vendor_name != "nvidia" or not HAS_FLAGTREE_FLAGTUNE,
+    reason="The config requires NVIDIA Hopper kernels and the optional FlagTree FlagTune package.",
 )
 def test_hopper_mm_config_compiles_without_runtime_registration():
     """Compile all training variants and verify canonical kernel pair bindings."""

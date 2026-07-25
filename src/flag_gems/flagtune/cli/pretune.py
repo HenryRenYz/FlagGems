@@ -22,9 +22,11 @@ Environment variables:
   * Backend visibility variables such as ``CUDA_VISIBLE_DEVICES``,
     ``ROCR_VISIBLE_DEVICES``, and ``HIP_VISIBLE_DEVICES`` limit visible device
     tokens and are captured in the run manifest.
-  * ``USE_FLAGTUNE`` and ``FLAGTUNE_INCLUDE`` are FlagGems-local policy inputs.
-  * ``TRITON_USE_FLAGTUNE``, ``FLAGTUNE_DISABLE_OPS``,
-    ``TRITON_FLAGTUNE_TOP_K``, ``TRITON_FLAGTUNE_MODEL_DIR``,
+  * ``FLAGGEMS_FLAGTUNE_EXPANDED`` and ``FLAGGEMS_FLAGTUNE_INCLUDE`` are
+    FlagGems-local legacy-expanded policy inputs. ``USE_FLAGTUNE`` and
+    ``FLAGTUNE_INCLUDE`` remain their compatibility aliases.
+  * ``FLAGTUNE_ENABLE``, ``FLAGTUNE_DISABLE_OPS``,
+    ``FLAGTUNE_TOP_K``, ``FLAGTUNE_MODEL_DIR``,
     ``FLAGTUNE_MODEL_CACHE``, and ``FLAGTUNE_DISABLE_REMOTE`` are passed to
     FlagTree's proposer/model-resolution path unchanged and recorded for audit.
 
@@ -93,12 +95,14 @@ from flag_gems.flagtune.reporting.schema import SCHEMA_VERSION  # noqa: E402
 
 DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "flagtune-pretune-output"
 STRATEGY_ENV_NAMES = (
+    "FLAGGEMS_FLAGTUNE_EXPANDED",
+    "FLAGGEMS_FLAGTUNE_INCLUDE",
     "USE_FLAGTUNE",
     "FLAGTUNE_INCLUDE",
-    "TRITON_USE_FLAGTUNE",
+    "FLAGTUNE_ENABLE",
     "FLAGTUNE_DISABLE_OPS",
-    "TRITON_FLAGTUNE_TOP_K",
-    "TRITON_FLAGTUNE_MODEL_DIR",
+    "FLAGTUNE_TOP_K",
+    "FLAGTUNE_MODEL_DIR",
     "FLAGTUNE_MODEL_CACHE",
     "FLAGTUNE_DISABLE_REMOTE",
     "CUDA_VISIBLE_DEVICES",

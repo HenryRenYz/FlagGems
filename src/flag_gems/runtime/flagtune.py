@@ -17,8 +17,15 @@ import warnings
 from dataclasses import dataclass
 from types import MappingProxyType
 
-USE_FLAGTUNE_ENV = "USE_FLAGTUNE"
-FLAGTUNE_INCLUDE_ENV = "FLAGTUNE_INCLUDE"
+FLAGGEMS_FLAGTUNE_EXPANDED_ENV = "FLAGGEMS_FLAGTUNE_EXPANDED"
+FLAGGEMS_FLAGTUNE_INCLUDE_ENV = "FLAGGEMS_FLAGTUNE_INCLUDE"
+LEGACY_USE_FLAGTUNE_ENV = "USE_FLAGTUNE"
+LEGACY_FLAGTUNE_INCLUDE_ENV = "FLAGTUNE_INCLUDE"
+# Keep public constant imports working while all FlagGems-owned code writes the
+# namespaced variables above. The legacy environment names remain read-only
+# compatibility aliases.
+USE_FLAGTUNE_ENV = LEGACY_USE_FLAGTUNE_ENV
+FLAGTUNE_INCLUDE_ENV = LEGACY_FLAGTUNE_INCLUDE_ENV
 
 _flagtune_op_registry = {}
 _include_ops = None
@@ -108,28 +115,56 @@ def _normalize_include(include):
     return ops
 
 
+def _environment_value(canonical_name, legacy_name):
+    """Read a namespaced FlagGems setting, falling back to its legacy alias."""
+    value = os.environ.get(canonical_name)
+    return value if value is not None else os.environ.get(legacy_name)
+
+
+def _expanded_from_env():
+    """Return legacy expanded-search enablement with canonical-name priority."""
+    return (
+        _environment_value(FLAGGEMS_FLAGTUNE_EXPANDED_ENV, LEGACY_USE_FLAGTUNE_ENV)
+        == "1"
+    )
+
+
+def flagtune_expanded_enabled():
+    """Return whether the global legacy expanded search is enabled.
+
+    This intentionally excludes per-operator include-list selection. It keeps
+    old decorators that historically recognized only ``USE_FLAGTUNE=1`` on
+    their exact global-enable semantics while moving them to the namespaced
+    canonical environment variable.
+    """
+    return _expanded_from_env()
+
+
 def flagtune(include=None):
     """Enable runtime FlagTune for selected operators.
 
     Passing include=None enables the registry's default operators. Passing a
     string or iterable selects the registered operators that should use
     expanded tuning spaces when their LibTuner runs. This API only updates the
-    explicit include list; setting USE_FLAGTUNE=1 remains the legacy opt-in for
-    enabling every registered FlagTune operator.
+    explicit include list; setting ``FLAGGEMS_FLAGTUNE_EXPANDED=1`` enables
+    every registered FlagTune operator. The old ``USE_FLAGTUNE`` name remains
+    a compatibility alias for that legacy expanded-search mechanism.
     """
     global _include_ops
     _include_ops = _normalize_include(include)
-    os.environ[FLAGTUNE_INCLUDE_ENV] = ",".join(sorted(_include_ops))
+    os.environ[FLAGGEMS_FLAGTUNE_INCLUDE_ENV] = ",".join(sorted(_include_ops))
 
 
 def _include_from_env():
-    include = os.environ.get(FLAGTUNE_INCLUDE_ENV)
+    include = _environment_value(
+        FLAGGEMS_FLAGTUNE_INCLUDE_ENV, LEGACY_FLAGTUNE_INCLUDE_ENV
+    )
     if include is None:
         return frozenset()
     try:
         return _normalize_include(include)
     except (TypeError, ValueError) as err:
-        warnings.warn(f"Invalid {FLAGTUNE_INCLUDE_ENV}: {err}")
+        warnings.warn(f"Invalid FlagGems FlagTune include list: {err}")
         return frozenset()
 
 
@@ -146,7 +181,7 @@ def flagtune_enabled(op_name):
         return False
     if op_name not in get_supported_flagtune_ops():
         return False
-    return os.environ.get(USE_FLAGTUNE_ENV) == "1" or op_name in get_flagtune_include()
+    return _expanded_from_env() or op_name in get_flagtune_include()
 
 
 def __getattr__(name):
@@ -208,11 +243,16 @@ register_flagtune_op(
 # DEFAULT_FLAGTUNE_INCLUDE and SUPPORTED_FLAGTUNE_OPS are provided by __getattr__.
 __all__ = [  # noqa: F822
     "DEFAULT_FLAGTUNE_INCLUDE",
+    "FLAGGEMS_FLAGTUNE_EXPANDED_ENV",
+    "FLAGGEMS_FLAGTUNE_INCLUDE_ENV",
     "FLAGTUNE_INCLUDE_ENV",
     "FlagTuneOpSpec",
+    "LEGACY_FLAGTUNE_INCLUDE_ENV",
+    "LEGACY_USE_FLAGTUNE_ENV",
     "SUPPORTED_FLAGTUNE_OPS",
     "USE_FLAGTUNE_ENV",
     "flagtune",
+    "flagtune_expanded_enabled",
     "flagtune_enabled",
     "get_default_flagtune_include",
     "get_flagtune_include",

@@ -17,7 +17,7 @@ from contextlib import contextmanager
 from . import backend, common, error
 from .backend.device_finder import DeviceDetector
 from .configs_loader import TunedConfigLoader
-from .flagtune import flagtune, flagtune_enabled
+from .flagtune import flagtune, flagtune_enabled, flagtune_expanded_enabled
 
 config_loader = TunedConfigLoader()
 device = DeviceDetector()
@@ -84,6 +84,7 @@ __all__ = [
     "device",
     "error",
     "flagtune",
+    "flagtune_expanded_enabled",
     "flagtune_enabled",
     "get_expand_config",
     "get_heuristic_config",

@@ -12,7 +12,7 @@ device-runtime adapter; isolation and task scheduling are provided by
 ``benchmark.py``.
 
 Environment variables:
-    ``FLAGTUNE_TRAIN_PROGRESS_INTERVAL`` is parsed as a non-negative integer
+    ``FLAGGEMS_FLAGTUNE_PROGRESS_INTERVAL`` is parsed as a non-negative integer
     only for exhaustive training collection. A positive value emits progress
     after that many successful config benchmarks; ``0`` (the default) suppresses
     those messages. Invalid values raise when the training executor queries it.
@@ -335,12 +335,16 @@ def _progress_interval() -> int:
     """Read the optional per-worker explicit-config progress interval.
 
     Returns:
-        A non-negative integer from ``FLAGTUNE_TRAIN_PROGRESS_INTERVAL``.
+        A non-negative integer from ``FLAGGEMS_FLAGTUNE_PROGRESS_INTERVAL`` or
+        its legacy ``FLAGTUNE_TRAIN_PROGRESS_INTERVAL`` alias.
         Missing, invalid, and negative values disable interval reporting by
         returning zero.
     """
     try:
-        return max(0, int(os.environ.get("FLAGTUNE_TRAIN_PROGRESS_INTERVAL", "0")))
+        value = os.environ.get("FLAGGEMS_FLAGTUNE_PROGRESS_INTERVAL")
+        if value is None:
+            value = os.environ.get("FLAGTUNE_TRAIN_PROGRESS_INTERVAL", "0")
+        return max(0, int(value))
     except ValueError:
         return 0
 

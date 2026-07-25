@@ -29,6 +29,11 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
+pytest.importorskip(
+    "triton.flagtune",
+    reason="FlagGems FlagTune Pretune tests require the optional FlagTree package",
+)
+
 SCRIPT_PATH = (
     Path(__file__).resolve().parents[2]
     / "src"

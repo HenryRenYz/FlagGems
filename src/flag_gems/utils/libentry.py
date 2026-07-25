@@ -370,11 +370,11 @@ class LibTuner(triton.runtime.Autotuner):
                 tensor dtypes in model identity order. YAML cannot set it.
 
         Notes:
-            ``USE_FLAGTUNE``/FlagGems runtime enablement switches to the legacy
-            expanded config space and intentionally bypasses the FlagTree
-            proposer policy.  FlagTree's own enablement is
-            ``TRITON_USE_FLAGTUNE``.  The similar names represent independent
-            mechanisms and must not be treated as aliases.
+            ``FLAGGEMS_FLAGTUNE_EXPANDED`` switches to the legacy expanded
+            config space and intentionally bypasses the FlagTree proposer
+            policy. ``USE_FLAGTUNE`` remains its compatibility alias.
+            FlagTree's own enablement is ``FLAGTUNE_ENABLE``. The two
+            mechanisms are independent and must not be treated as aliases.
         """
         selected_benchmark_mode = _select_benchmark_mode(benchmark_mode, use_cuda_graph)
         benchmark_retries = _validate_benchmark_retries(benchmark_retries)
@@ -1041,8 +1041,12 @@ def _flagtune_available() -> Tuple[bool, Optional[BaseException]]:
 
 def _flagtune_enabled() -> bool:
     """Return FlagTree's cached enablement independently of legacy FlagGems."""
-    from triton.flagtune import is_enabled
-
+    try:
+        from triton.flagtune import is_enabled
+    except (ImportError, AttributeError):
+        # Keep the runtime-only integration optional even if a caller probes
+        # this helper independently of the availability check above.
+        return False
     return is_enabled()
 
 
@@ -1207,11 +1211,12 @@ def flagtune_policy(
         pre-hook when needed, and are benchmarked to choose the minimum latency.
 
     Notes:
-        FlagGems' legacy ``USE_FLAGTUNE`` path selects expanded configs and
-        deliberately uses the default exhaustive LibTuner policy; it is not the
-        FlagTree proposer enable switch.  Expected integration failures are
-        logged once per reason and do not stop kernel execution.  Candidate
-        benchmark failures are skipped individually.  The proposer may invoke
+        FlagGems' legacy ``FLAGGEMS_FLAGTUNE_EXPANDED`` path selects expanded
+        configs and deliberately uses the default exhaustive LibTuner policy;
+        ``USE_FLAGTUNE`` remains a compatibility alias. It is not the
+        ``FLAGTUNE_ENABLE`` proposer switch. Expected integration failures are
+        logged once per reason and do not stop kernel execution. Candidate
+        benchmark failures are skipped individually. The proposer may invoke
         ``bench_fn`` before the final selection loop, but LibTuner's benchmark
         cache normally prevents duplicate device measurements.
     """
@@ -1220,11 +1225,11 @@ def flagtune_policy(
         self._flagtune_op_name
     ):
         return LibTuner.get("default").policy(self, bench_fn, configs, args, kwargs)
+    if not _flagtune_enabled():
+        return LibTuner.get("default").policy(self, bench_fn, configs, args, kwargs)
     available, exc = _flagtune_available()
     if not available:
         _warn_flagtune_unavailable_once(exc)
-        return LibTuner.get("default").policy(self, bench_fn, configs, args, kwargs)
-    if not _flagtune_enabled():
         return LibTuner.get("default").policy(self, bench_fn, configs, args, kwargs)
 
     op_id = self._flagtune_op_id

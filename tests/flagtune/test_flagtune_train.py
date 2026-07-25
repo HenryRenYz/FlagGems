@@ -15,6 +15,11 @@ from pathlib import Path
 
 import pytest
 
+pytest.importorskip(
+    "triton.flagtune",
+    reason="FlagGems offline FlagTune training tests require the optional FlagTree package",
+)
+
 TRAIN_PATH = (
     Path(__file__).resolve().parents[2]
     / "src"
@@ -364,13 +369,13 @@ def test_generic_config_progress_interval_handles_environment_values(monkeypatch
     load_path(TRAIN_PATH, "flag_gems_flagtune_train_for_progress_env")
     mod = importlib.import_module("flag_gems.flagtune.runtime.executor")
 
-    monkeypatch.delenv("FLAGTUNE_TRAIN_PROGRESS_INTERVAL", raising=False)
+    monkeypatch.delenv("FLAGGEMS_FLAGTUNE_PROGRESS_INTERVAL", raising=False)
     assert mod._progress_interval() == 0
-    monkeypatch.setenv("FLAGTUNE_TRAIN_PROGRESS_INTERVAL", "17")
+    monkeypatch.setenv("FLAGGEMS_FLAGTUNE_PROGRESS_INTERVAL", "17")
     assert mod._progress_interval() == 17
-    monkeypatch.setenv("FLAGTUNE_TRAIN_PROGRESS_INTERVAL", "-4")
+    monkeypatch.setenv("FLAGGEMS_FLAGTUNE_PROGRESS_INTERVAL", "-4")
     assert mod._progress_interval() == 0
-    monkeypatch.setenv("FLAGTUNE_TRAIN_PROGRESS_INTERVAL", "invalid")
+    monkeypatch.setenv("FLAGGEMS_FLAGTUNE_PROGRESS_INTERVAL", "invalid")
     assert mod._progress_interval() == 0
 
 

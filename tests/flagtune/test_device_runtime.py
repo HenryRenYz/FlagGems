@@ -3,9 +3,21 @@
 from types import SimpleNamespace
 
 import pytest
-from triton.flagtune.runtime.device import DeviceDescriptor, DeviceProbeError
 
-from flag_gems.flagtune.runtime.device import DeviceRuntime, DeviceUnavailableError
+pytest.importorskip(
+    "triton.flagtune",
+    reason="FlagGems FlagTune device-adapter tests require the optional FlagTree package",
+)
+
+from triton.flagtune.runtime.device import (  # noqa: E402
+    DeviceDescriptor,
+    DeviceProbeError,
+)
+
+from flag_gems.flagtune.runtime.device import (  # noqa: E402
+    DeviceRuntime,
+    DeviceUnavailableError,
+)
 
 
 class _FakeDeviceAPI:

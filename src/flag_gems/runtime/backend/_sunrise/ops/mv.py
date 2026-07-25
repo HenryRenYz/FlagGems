@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import logging
-import os
 
 import torch
 import triton
@@ -32,13 +31,13 @@ logger = logging.getLogger(__name__)
     # configs=runtime.get_tuned_config("mv"),
     configs=(
         runtime.ops_get_configs("mv", pre_hook=None)
-        if os.environ.get("USE_FLAGTUNE") == "1"
+        if runtime.flagtune_expanded_enabled()
         else runtime.get_tuned_config("mv")
     ),
     key=["M", "N"],
     strategy=(
         runtime.get_expand_config("mv")["strategy"]
-        if os.environ.get("USE_FLAGTUNE") == "1"
+        if runtime.flagtune_expanded_enabled()
         else ["align32", "align32"]
     ),
 )

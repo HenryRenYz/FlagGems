@@ -12,6 +12,7 @@ import importlib.util
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -185,6 +186,170 @@ class FakeVariant:
         }
 
 
+def _run_training_with_results(mod, monkeypatch, tmp_path, results, exported):
+    """Run the training coordinator with collection and XGBoost boundaries faked."""
+
+    class Record:
+        @staticmethod
+        def to_benchmark_shape():
+            return {"M": 16}
+
+    variant = SimpleNamespace(
+        name="general_tma",
+        feature_names=("M",),
+        iter_configs=lambda: iter(({"BLOCK": 16},)),
+    )
+    operator_info = SimpleNamespace(
+        op_id="flaggems/mm",
+        get_variant=lambda _name: variant,
+    )
+    spec = SimpleNamespace(
+        operator_info=operator_info,
+        source_sha256="sha256",
+        shape=SimpleNamespace(identity=("M",)),
+    )
+    context = SimpleNamespace(
+        visible_device_count=1,
+        backend_name="cuda",
+        device_names=("NVIDIA H20-3e",),
+        device_architectures=("sm90",),
+    )
+    batch = SimpleNamespace(
+        results=results,
+        worker_returncodes=[0],
+        database_merge={},
+        database_merge_error="",
+    )
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+
+    monkeypatch.setattr(mod, "load_operator_benchmark_spec", lambda _path: spec)
+    monkeypatch.setattr(
+        mod, "load_shape_records", lambda _path, _spec: [Record(), Record()]
+    )
+    monkeypatch.setattr(
+        mod,
+        "initialize_planning_context",
+        lambda _spec: (context, SimpleNamespace(op_id="flaggems/mm")),
+    )
+    monkeypatch.setattr(
+        mod,
+        "parse_sort",
+        lambda _text: SimpleNamespace(mode="source", seed=None),
+    )
+    monkeypatch.setattr(mod, "select_shape_records", lambda records, *_args: records)
+    monkeypatch.setattr(mod, "visible_device_tokens", lambda _context: ["0"])
+    monkeypatch.setattr(mod, "make_run_dir", lambda *_args: run_dir)
+    monkeypatch.setattr(
+        mod,
+        "_database_url",
+        lambda *_args: ("sqlite:///test.db", tmp_path / "test.db", "fixture"),
+    )
+    monkeypatch.setattr(mod, "sanitize_db_url", lambda value: value)
+    monkeypatch.setattr(mod, "environment_snapshot", lambda: {})
+    monkeypatch.setattr(
+        mod,
+        "_progress",
+        lambda *_args: SimpleNamespace(update=lambda _count: None, close=lambda: None),
+    )
+    monkeypatch.setattr(
+        mod, "run_shape_config_benchmarks", lambda *_args, **_kwargs: batch
+    )
+    monkeypatch.setattr(
+        mod,
+        "_append_collection_rows",
+        lambda *_args: (len(results), len(results), 0),
+    )
+    monkeypatch.setattr(mod, "_training_options", lambda _args: object())
+    monkeypatch.setattr(mod, "write_manifest", lambda *_args: None)
+
+    from triton.flagtune.contract import operator_schema
+    from triton.flagtune.training import ranker
+
+    monkeypatch.setattr(
+        operator_schema, "model_config_sha256", lambda _config: "digest"
+    )
+    monkeypatch.setattr(
+        ranker,
+        "train_xgboost_ranker",
+        lambda *_args: (object(), {"xgboost_fit_elapsed_s": 0.0}),
+    )
+
+    def fake_export(_model, _variant, _run_dir, _summary, **kwargs):
+        exported.update(kwargs)
+        return SimpleNamespace(model_path=run_dir / "model.tar.gz", model_config={})
+
+    monkeypatch.setattr(ranker, "export_ranker_model", fake_export)
+    args = mod.build_parser().parse_args(
+        [
+            "--shape-config",
+            str(tmp_path / "shapes.yaml"),
+            "--flagtune-config",
+            str(tmp_path / "config.yaml"),
+            "--variant",
+            "general_tma",
+            "--model-version",
+            "1.2.3",
+            "--output",
+            str(tmp_path),
+            "--keep-intermediate-files",
+        ]
+    )
+    return mod.run_main(args)
+
+
+def _successful_collection_result(architecture="sm90"):
+    return {
+        "status": "ok",
+        "platform_key": "nvidia-h20",
+        "dtype_key": "bf16-bf16-bf16",
+        "input_dtypes": ["bfloat16", "bfloat16"],
+        "output_dtypes": ["bfloat16"],
+        "gpu_metadata": {
+            "backend": "cuda",
+            "vendor": "NVIDIA",
+            "device_name": "NVIDIA H20-3e",
+            "architecture": architecture,
+            "platform_key": "nvidia-h20",
+        },
+    }
+
+
+def test_training_rejects_same_platform_with_different_architectures(
+    monkeypatch, tmp_path
+):
+    mod = load_path(TRAIN_PATH, "flag_gems_flagtune_train_architecture")
+
+    with pytest.raises(mod.TrainError, match="platform/architecture metadata"):
+        _run_training_with_results(
+            mod,
+            monkeypatch,
+            tmp_path,
+            [
+                _successful_collection_result("sm90"),
+                _successful_collection_result("sm89"),
+            ],
+            {},
+        )
+
+
+def test_training_exports_platform_identity_and_retained_architecture(
+    monkeypatch, tmp_path
+):
+    mod = load_path(TRAIN_PATH, "flag_gems_flagtune_train_export_identity")
+    exported = {}
+
+    result = _successful_collection_result()
+    assert (
+        _run_training_with_results(
+            mod, monkeypatch, tmp_path, [result, dict(result)], exported
+        )
+        == 0
+    )
+    assert exported["identity"].platform_key == "nvidia-h20"
+    assert exported["gpu"]["architecture"] == "sm90"
+
+
 def test_collection_rows_are_flattened_to_streaming_training_jsonl(tmp_path):
     """Flatten complete per-shape timings into one auditable JSONL row each."""
     mod = load_path(TRAIN_PATH, "flag_gems_flagtune_train_rows")
@@ -202,13 +367,13 @@ def test_collection_rows_are_flattened_to_streaming_training_jsonl(tmp_path):
         "K": 128,
         "gpu": "1",
         "gpu_name": "Fake GPU",
-        "gpu_key": "nvidia-fake-gpu-sm90",
+        "platform_key": "nvidia-h20",
         "gpu_metadata": {
             "backend": "cuda",
             "vendor": "nvidia",
             "device_name": "Fake GPU",
             "architecture": "sm90",
-            "gpu_key": "nvidia-fake-gpu-sm90",
+            "platform_key": "nvidia-h20",
         },
         "input_dtypes": ["bfloat16", "bfloat16"],
         "output_dtypes": ["bfloat16"],
@@ -258,6 +423,7 @@ def test_collection_rows_are_flattened_to_streaming_training_jsonl(tmp_path):
         },
         "model_dtype_key": "bf16-bf16-bf16",
     }
+    assert row["model_identity"]["platform_key"] == "nvidia-h20"
     assert row["model_identity"]["dtype_key"] == "bf16-bf16-bf16"
     assert row["Count"] == 9
     assert row["latency_ms"] == 1.234568
@@ -282,6 +448,8 @@ def test_collection_failure_uses_workload_not_model_input_dimensions(tmp_path):
         "M": 64,
         "N": 32,
         "K": 128,
+        "platform_key": "nvidia-h20",
+        "dtype_key": "bf16-bf16-bf16",
         "error": "fixture failure",
     }
 
@@ -318,6 +486,8 @@ def test_collection_failure_reports_missing_workload_dimensions(tmp_path):
         "B": 1,
         "M": 64,
         "N": 32,
+        "platform_key": "nvidia-h20",
+        "dtype_key": "bf16-bf16-bf16",
         "config_timings": [],
     }
 

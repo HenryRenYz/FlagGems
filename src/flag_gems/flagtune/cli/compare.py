@@ -43,6 +43,7 @@ COPY_COLUMNS_SUFFIX = (
     "Count",
     "input_dtypes",
     "output_dtypes",
+    "model_platform_key",
     "model_dtype_key",
 )
 POLICY_COLUMNS = (
@@ -72,7 +73,7 @@ BENCHMARK_PROTOCOL_COLUMNS = (
 V1_ALIASES = {
     "source_index": "input_row_index",
     "dtype_key": "model_dtype_key",
-    "gpu_key": "model_gpu_key",
+    "platform_key": "model_platform_key",
     "worker_id": "worker_index",
     "cache_hit": "tuning_cache_hit",
     "candidate_config_count": "config_count",
@@ -157,7 +158,7 @@ def _read_rows(path: Path, label: str) -> tuple[list[dict[str, str]], list[str]]
 def _normalize_schema(
     rows: Sequence[Mapping[str, str]], fieldnames: Sequence[str]
 ) -> tuple[list[dict[str, str]], list[str]]:
-    """Map a legacy Pretune CSV to the current canonical input names."""
+    """Map a private Pretune CSV to the current canonical input names."""
     names = set(fieldnames)
     is_v2 = "input_row_index" in names
     if not is_v2 and "source_index" not in names:
@@ -175,6 +176,14 @@ def _normalize_schema(
     for new in V1_ALIASES.values():
         if normalized and new in normalized[0] and new not in normalized_fields:
             normalized_fields.append(new)
+    if "model_platform_key" not in normalized_fields:
+        raise ComparisonError("Pretune CSV is missing required model_platform_key")
+    for row_number, row in enumerate(normalized, start=2):
+        platform_key = row.get("model_platform_key")
+        if not isinstance(platform_key, str) or not platform_key.strip():
+            raise ComparisonError(
+                f"Pretune CSV row {row_number} is missing model_platform_key"
+            )
     return normalized, normalized_fields
 
 
@@ -303,7 +312,12 @@ def compare_rows(
             f"baseline={list(baseline_dimensions)!r}; "
             f"ours={list(ours_dimensions)!r}"
         )
-    identity_columns = ("op_name", "variant", *baseline_dimensions)
+    identity_columns = (
+        "op_name",
+        "variant",
+        "model_platform_key",
+        *baseline_dimensions,
+    )
     copy_columns = _copy_columns(baseline_dimensions)
     baseline_rows, baseline_fields = _normalize_schema(baseline_rows, baseline_fields)
     ours_rows, ours_fields = _normalize_schema(ours_rows, ours_fields)
@@ -467,6 +481,10 @@ def comparison_json_row(
             "inputs": _json_value(row.get("input_dtypes"), []),
             "outputs": _json_value(row.get("output_dtypes"), []),
             "model_dtype_key": row.get("model_dtype_key") or None,
+        },
+        "model_identity": {
+            "platform_key": row.get("model_platform_key") or None,
+            "dtype_key": row.get("model_dtype_key") or None,
         },
         "benchmark_protocol": {
             "requested_mode": row.get("benchmark_requested_mode") or None,

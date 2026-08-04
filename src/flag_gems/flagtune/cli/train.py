@@ -4,7 +4,8 @@
 This offline tool benchmarks the complete or sampled parameter Cartesian
 product for one YAML variant, appends measurements to streaming JSONL, performs
 one grouped XGBoost ranking fit, and exports a versioned self-contained archive
-at ``gpu_key/op_id/variant/dtype_key/model_version/model.tar.gz``.
+at ``<output>/<op_id>/<variant>/<dtype_key>/model.tar.gz`` for later platform
+package assembly.
 
 CLI arguments:
   * ``--shape-config``, ``--flagtune-config``, and ``--variant`` select the
@@ -490,7 +491,7 @@ def _append_collection_rows(
                         "outputs": result["output_dtypes"],
                     },
                     "model_identity": {
-                        "gpu_key": result.get("gpu_key"),
+                        "platform_key": result.get("platform_key"),
                         "dtype_key": result["dtype_key"],
                     },
                     "device": {
@@ -669,7 +670,7 @@ def run_main(args: argparse.Namespace) -> int:
     benchmark_successes = 0
     benchmark_protocols: dict[str, Mapping[str, Any]] = {}
     batch_manifests = []
-    gpu_keys: set[str] = set()
+    platform_keys: set[str] = set()
     dtype_keys: set[str] = set()
     ordered_dtypes: Optional[list[str]] = None
     gpu_metadata: Optional[Mapping[str, Any]] = None
@@ -724,7 +725,8 @@ def run_main(args: argparse.Namespace) -> int:
                     benchmark_protocols[json.dumps(protocol, sort_keys=True)] = dict(
                         protocol
                     )
-                gpu_keys.add(str(result.get("gpu_key")))
+                platform_keys.add(str(result.get("platform_key")))
+                current_gpu_metadata = result.get("gpu_metadata")
                 dtype_keys.add(str(result.get("dtype_key")))
                 current_dtypes = [
                     *result.get("input_dtypes", []),
@@ -732,14 +734,16 @@ def run_main(args: argparse.Namespace) -> int:
                 ]
                 if ordered_dtypes is None:
                     ordered_dtypes = current_dtypes
-                    gpu_metadata = result.get("gpu_metadata")
+                    gpu_metadata = current_gpu_metadata
                 elif current_dtypes != ordered_dtypes:
                     raise TrainError(
                         "collection produced inconsistent ordered input/output dtypes"
                     )
-                if len(gpu_keys) != 1:
+                elif current_gpu_metadata != gpu_metadata:
+                    raise TrainError("collection mixed platform/architecture metadata")
+                if len(platform_keys) != 1:
                     raise TrainError(
-                        f"collection mixed GPU identities: {sorted(gpu_keys)}"
+                        f"collection mixed platform identities: {sorted(platform_keys)}"
                     )
                 if len(dtype_keys) != 1:
                     raise TrainError(
@@ -835,14 +839,19 @@ def run_main(args: argparse.Namespace) -> int:
             "benchmark_protocols": list(benchmark_protocols.values()),
         }
         if (
-            not gpu_keys
+            not platform_keys
             or not dtype_keys
             or ordered_dtypes is None
             or gpu_metadata is None
         ):
-            raise TrainError("collection produced no successful GPU/dtype identity")
+            raise TrainError(
+                "collection produced no successful platform/dtype identity"
+            )
         identity = ModelIdentity(
-            next(iter(gpu_keys)), op_id, requested_variant, next(iter(dtype_keys))
+            platform_key=next(iter(platform_keys)),
+            op_id=op_id,
+            variant=requested_variant,
+            dtype_key=next(iter(dtype_keys)),
         )
         exported = export_ranker_model(
             model,

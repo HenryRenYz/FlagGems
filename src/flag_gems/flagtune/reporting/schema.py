@@ -16,6 +16,17 @@ MILLISECOND_DIGITS = 6
 DERIVED_DIGITS = 3
 
 
+class ReportSchemaError(ValueError):
+    """Reject a worker row that cannot satisfy the public identity contract."""
+
+
+def _platform_identity(row: Mapping[str, Any]) -> str:
+    platform_key = row.get("platform_key")
+    if not isinstance(platform_key, str) or not platform_key.strip():
+        raise ReportSchemaError("report row is missing required platform_key")
+    return platform_key
+
+
 def rounded_number(value: Any, digits: int) -> float | None:
     """Return a finite rounded float, or ``None`` for unavailable values."""
     if value is None or value == "":
@@ -79,6 +90,7 @@ def pretune_json_row(
     row: Mapping[str, Any], shape_fields: Sequence[str]
 ) -> dict[str, Any]:
     """Convert one private worker result to the public nested Schema v3 row."""
+    platform_key = _platform_identity(row)
     config_search: dict[str, Any] = {
         "tuning_cache_hit": row.get("cache_hit"),
         "tuning_time_ms": rounded_ms(row.get("tuning_time_ms")),
@@ -107,7 +119,7 @@ def pretune_json_row(
             "outputs": row.get("output_dtypes"),
         },
         "model_identity": {
-            "gpu_key": row.get("gpu_key"),
+            "platform_key": platform_key,
             "dtype_key": row.get("dtype_key"),
         },
         "device": {
@@ -152,7 +164,7 @@ def pretune_csv_fieldnames(shape_fields: Sequence[str]) -> list[str]:
         "model_dtype_key",
         "gpu",
         "gpu_name",
-        "model_gpu_key",
+        "model_platform_key",
         "worker_index",
         "status",
         "tuning_cache_hit",
@@ -187,6 +199,7 @@ def pretune_csv_row(
     row: Mapping[str, Any], shape_fields: Sequence[str]
 ) -> dict[str, Any]:
     """Convert one private worker result to the public flat CSV Schema v3 row."""
+    platform_key = _platform_identity(row)
     dimensions = _dimensions(row, shape_fields)
     benchmark_protocol = row.get("benchmark_protocol")
     if not isinstance(benchmark_protocol, Mapping):
@@ -204,7 +217,7 @@ def pretune_csv_row(
         "model_dtype_key": row.get("dtype_key"),
         "gpu": row.get("gpu"),
         "gpu_name": row.get("gpu_name"),
-        "model_gpu_key": row.get("gpu_key"),
+        "model_platform_key": platform_key,
         "worker_index": row.get("worker_id"),
         "status": row.get("status"),
         "tuning_cache_hit": row.get("cache_hit"),

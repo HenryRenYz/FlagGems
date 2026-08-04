@@ -46,7 +46,7 @@ from typing import (
 )
 
 import triton
-from triton.runtime.benchmark import (
+from triton.runtime.benchmark_protocol import (
     BenchmarkMode,
     BenchmarkProtocol,
     resolve_benchmarker,
@@ -1020,8 +1020,6 @@ class LibTuner(triton.runtime.Autotuner):
 _FLAGTUNE_PROPOSER_POOL: Dict[Any, Any] = {}
 _FLAGTUNE_VARIANT_INFO_POOL: Dict[Any, Any] = {}
 _FLAGTUNE_AVAILABILITY: Optional[Tuple[bool, Optional[BaseException]]] = None
-_FLAGTUNE_UNAVAILABLE_WARNED = False
-_FLAGTUNE_FALLBACK_WARNED: set = set()
 
 
 def _flagtune_available() -> Tuple[bool, Optional[BaseException]]:
@@ -1044,40 +1042,19 @@ def _flagtune_enabled() -> bool:
     try:
         from triton.flagtune import is_enabled
     except (ImportError, AttributeError):
-        # Keep the runtime-only integration optional even if a caller probes
-        # this helper independently of the availability check above.
-        return False
+        return os.environ.get("FLAGTUNE_ENABLE", "").strip() == "1"
     return is_enabled()
 
 
-def _warn_flagtune_unavailable_once(exc: Optional[BaseException]) -> None:
-    global _FLAGTUNE_UNAVAILABLE_WARNED
-    if _FLAGTUNE_UNAVAILABLE_WARNED:
-        return
-    logger.warning(
-        "FlagTune requested but triton.flagtune is unavailable: %s; using default policy.",
-        exc,
-    )
-    _FLAGTUNE_UNAVAILABLE_WARNED = True
-
-
-def _warn_flagtune_fallback_once(reason: str, message: str, *args) -> None:
-    if reason in _FLAGTUNE_FALLBACK_WARNED:
-        return
-    logger.warning(message, *args)
-    _FLAGTUNE_FALLBACK_WARNED.add(reason)
-
-
 def _ensure_flagtune_proposer(identity):
-    """Return cached proposer and bundled metadata for one operator variant.
+    """Return the proposer and bundled metadata for one resolved model version.
 
     Args:
-        op_id: Globally namespaced logical operator identifier.
-        variant: Single-segment implementation/model variant.
+        identity: Complete platform, operator, variant, and dtype model identity.
 
     Returns:
         ``(ConfigProposer, VariantInfo)`` stored in process-global pools keyed by
-        the operator/variant tuple.
+        complete identity plus the model version selected by FlagTree.
 
     Raises:
         FileNotFoundError: If the model bundle cannot be resolved.
@@ -1086,29 +1063,32 @@ def _ensure_flagtune_proposer(identity):
             warning once and falls back.
 
     Notes:
-        Cached objects are never refreshed. Replacing model files later in the
-        process does not invalidate these pools.
+        FlagTree's shared model manager remains responsible for package refresh
+        and version selection. Loading first exposes the resolved version, so a
+        newly selected package receives a fresh local proposer/variant pair.
     """
-    if identity not in _FLAGTUNE_PROPOSER_POOL:
-        from triton.flagtune.runtime.proposer import (
-            load_model_bundle,
-            make_config_proposer,
-        )
+    from triton.flagtune.runtime.proposer import (
+        load_model_bundle,
+        make_config_proposer,
+    )
 
-        _FLAGTUNE_PROPOSER_POOL[identity] = make_config_proposer(
+    loaded = load_model_bundle(
+        identity.op_id,
+        identity.variant,
+        platform_key=identity.platform_key,
+        dtype_key=identity.dtype_key,
+    )
+    cache_key = (identity, loaded.model_version)
+    if cache_key not in _FLAGTUNE_PROPOSER_POOL:
+        _FLAGTUNE_PROPOSER_POOL[cache_key] = make_config_proposer(
             identity.op_id,
             identity.variant,
-            gpu_key=identity.gpu_key,
+            platform_key=identity.platform_key,
             dtype_key=identity.dtype_key,
         )
-        _FLAGTUNE_VARIANT_INFO_POOL[identity] = load_model_bundle(
-            identity.op_id,
-            identity.variant,
-            gpu_key=identity.gpu_key,
-            dtype_key=identity.dtype_key,
-        ).variant
+        _FLAGTUNE_VARIANT_INFO_POOL[cache_key] = loaded.variant
 
-    return _FLAGTUNE_PROPOSER_POOL[identity], _FLAGTUNE_VARIANT_INFO_POOL[identity]
+    return _FLAGTUNE_PROPOSER_POOL[cache_key], _FLAGTUNE_VARIANT_INFO_POOL[cache_key]
 
 
 def _configs_to_dicts_for_proposer(
@@ -1199,9 +1179,8 @@ def flagtune_policy(
 
     Returns:
         ``(best_config, timings)`` where timings maps successfully benchmarked
-        proposed Config objects to their latency values.  Any unavailable,
-        disabled, unnamed, ineligible, empty, or failed proposer route returns
-        the default policy's result instead.
+        proposed Config objects to their latency values. Explicit disablement
+        uses the default policy; enabled FlagTune contract failures propagate.
 
     Implementation:
         The policy resolves the cached operator/variant proposer, normalizes
@@ -1214,9 +1193,8 @@ def flagtune_policy(
         FlagGems' legacy ``FLAGGEMS_FLAGTUNE_EXPANDED`` path selects expanded
         configs and deliberately uses the default exhaustive LibTuner policy;
         ``USE_FLAGTUNE`` remains a compatibility alias. It is not the
-        ``FLAGTUNE_ENABLE`` proposer switch. Expected integration failures are
-        logged once per reason and do not stop kernel execution. Candidate
-        benchmark failures are skipped individually. The proposer may invoke
+        ``FLAGTUNE_ENABLE`` proposer switch. Enabled integration and candidate
+        benchmark failures propagate. The proposer may invoke
         ``bench_fn`` before the final selection loop, but LibTuner's benchmark
         cache normally prevents duplicate device measurements.
     """
@@ -1229,123 +1207,83 @@ def flagtune_policy(
         return LibTuner.get("default").policy(self, bench_fn, configs, args, kwargs)
     available, exc = _flagtune_available()
     if not available:
-        _warn_flagtune_unavailable_once(exc)
-        return LibTuner.get("default").policy(self, bench_fn, configs, args, kwargs)
+        raise RuntimeError("FlagTune is enabled but the FlagTree runtime is unavailable") from exc
 
     op_id = self._flagtune_op_id
     variant = self._flagtune_variant
     if op_id is None or variant is None:
-        return LibTuner.get("default").policy(self, bench_fn, configs, args, kwargs)
-    try:
-        from triton.flagtune.contract.identity import (
-            ModelIdentity,
-            discover_gpu_metadata,
-            make_dtype_key,
+        raise RuntimeError(
+            "FlagTune is enabled but flagtune_op_id/flagtune_variant are not configured"
         )
+    from triton.flagtune.contract.identity import (
+        ModelIdentity,
+        discover_gpu_metadata,
+        make_dtype_key,
+    )
 
-        arguments = dict(self.nargs or {})
-        dtype_resolver = getattr(self, "_flagtune_dtype_resolver", None)
-        if dtype_resolver is not None:
-            dtypes = tuple(dtype_resolver(arguments))
-        else:
-            dtypes = _infer_tensor_dtypes(
-                arguments[name] for name in self.arg_names if name in arguments
-            )
-        if not dtypes:
-            raise ValueError("no tensor dtypes available for FlagTune identity")
-        gpu = discover_gpu_metadata()
-        model_identity = ModelIdentity(
-            str(gpu["gpu_key"]), op_id, variant, make_dtype_key(dtypes)
+    arguments = dict(self.nargs or {})
+    dtype_resolver = getattr(self, "_flagtune_dtype_resolver", None)
+    if dtype_resolver is not None:
+        dtypes = tuple(dtype_resolver(arguments))
+    else:
+        dtypes = _infer_tensor_dtypes(
+            arguments[name] for name in self.arg_names if name in arguments
         )
-    except Exception as exc:
-        _warn_flagtune_fallback_once(
-            f"identity:{op_id}/{variant}:{exc}",
-            "FlagTune identity resolution failed for %s/%s: %s; falling back to default.",
-            op_id,
-            variant,
-            exc,
-        )
-        return LibTuner.get("default").policy(self, bench_fn, configs, args, kwargs)
+    if not dtypes:
+        raise ValueError("no tensor dtypes available for FlagTune identity")
+    gpu = discover_gpu_metadata()
+    model_identity = ModelIdentity(
+        platform_key=str(gpu["platform_key"]),
+        op_id=op_id,
+        variant=variant,
+        dtype_key=make_dtype_key(dtypes),
+    )
     identity = model_identity.artifact_key
 
-    try:
-        proposer, variant_info = _ensure_flagtune_proposer(model_identity)
-    except Exception as exc:
-        _warn_flagtune_fallback_once(
-            f"init:{identity}",
-            "FlagTune proposer init failed for %s: %s; falling back to default.",
-            identity,
-            exc,
-        )
-        return LibTuner.get("default").policy(self, bench_fn, configs, args, kwargs)
-
-    try:
-        shape = variant_info.normalize_inputs(self.nargs)
-    except Exception as exc:
-        _warn_flagtune_fallback_once(
-            f"inputs:{identity}",
-            "FlagTune input normalization failed for %s: %s; falling back to default.",
-            identity,
-            exc,
-        )
-        return LibTuner.get("default").policy(self, bench_fn, configs, args, kwargs)
+    proposer, variant_info = _ensure_flagtune_proposer(model_identity)
+    shape = variant_info.normalize_inputs(self.nargs)
 
     param_fields = variant_info.param_names
     to_config = variant_info.to_config
     initial = _configs_to_dicts_for_proposer(configs, param_fields)
-    meta = {"op_id": op_id, "variant": variant}
+    meta = {
+        "op_id": op_id,
+        "variant": variant,
+        "platform_key": model_identity.platform_key,
+        "dtype_key": model_identity.dtype_key,
+    }
 
     adapter = _make_proposer_bench_adapter(bench_fn, to_config)
 
-    try:
-        result_dicts = proposer(adapter, self.nargs, initial, meta)
-    except Exception as exc:
-        _warn_flagtune_fallback_once(
-            f"run:{identity}:{shape}",
-            "FlagTune proposer failed for %s shape=%s: %s; falling back to default.",
-            identity,
-            shape,
-            exc,
-        )
-        return LibTuner.get("default").policy(self, bench_fn, configs, args, kwargs)
+    result_dicts = proposer(adapter, self.nargs, initial, meta)
 
     if not result_dicts:
-        _warn_flagtune_fallback_once(
-            f"empty:{identity}",
-            "FlagTune proposer returned empty for %s; falling back to default.",
-            identity,
+        raise RuntimeError(
+            f"FlagTune proposer returned no configs for {identity} shape={shape}"
         )
-        return LibTuner.get("default").policy(self, bench_fn, configs, args, kwargs)
 
     timings: Dict[triton.Config, float] = {}
     best_config: Optional[triton.Config] = None
     best_latency: float = float("inf")
 
     for d in result_dicts:
-        try:
-            cfg = to_config(d)
-            if cfg.pre_hook is None and self._flagtune_pre_hook is not None:
-                # FlagTune creates fresh Config objects, so it must carry the same
-                # TMA pre-hook as expanded FlagGems configs. Without it, the
-                # TensorDescriptor block_shape can stay stale while BLOCK_* changes,
-                # which makes tl.dot infer a shape different from the accumulator.
-                cfg.pre_hook = self._flagtune_pre_hook
-            lat = float(bench_fn(cfg)[0])
-        except Exception:
-            continue
+        cfg = to_config(d)
+        if cfg.pre_hook is None and self._flagtune_pre_hook is not None:
+            # FlagTune creates fresh Config objects, so it must carry the same
+            # TMA pre-hook as expanded FlagGems configs. Without it, the
+            # TensorDescriptor block_shape can stay stale while BLOCK_* changes,
+            # which makes tl.dot infer a shape different from the accumulator.
+            cfg.pre_hook = self._flagtune_pre_hook
+        lat = float(bench_fn(cfg)[0])
         timings[cfg] = lat
         if lat < best_latency:
             best_latency = lat
             best_config = cfg
 
     if best_config is None:
-        _warn_flagtune_fallback_once(
-            f"bench:{identity}:{shape}",
-            "FlagTune proposer results all failed benchmark for %s shape=%s; falling back to default.",
-            identity,
-            shape,
+        raise RuntimeError(
+            f"FlagTune proposer produced no benchmarkable configs for {identity} shape={shape}"
         )
-        return LibTuner.get("default").policy(self, bench_fn, configs, args, kwargs)
     return best_config, timings
 
 

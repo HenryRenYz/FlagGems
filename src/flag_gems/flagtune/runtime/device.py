@@ -130,7 +130,7 @@ class DeviceRuntime:
         including an explicit event fallback when the backend has no equivalent
         mechanism.
         """
-        from triton.runtime.benchmark import resolve_benchmarker
+        from triton.runtime.benchmark_protocol import resolve_benchmarker
 
         return resolve_benchmarker(
             mode,

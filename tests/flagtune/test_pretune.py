@@ -23,16 +23,26 @@ import importlib.util
 import json
 import sqlite3
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 import yaml
 
+from flag_gems.flagtune.reporting import schema as reporting_schema
+
 pytest.importorskip(
     "triton.flagtune",
     reason="FlagGems FlagTune Pretune tests require the optional FlagTree package",
 )
+
+
+@pytest.mark.parametrize("converter", [reporting_schema.pretune_json_row, reporting_schema.pretune_csv_row])
+def test_report_conversion_requires_platform_identity(converter):
+    with pytest.raises(reporting_schema.ReportSchemaError, match="platform_key"):
+        converter({"dtype_key": "bf16-bf16-bf16"}, ["M"])
+
 
 SCRIPT_PATH = (
     Path(__file__).resolve().parents[2]
@@ -590,7 +600,7 @@ def test_write_outputs_keeps_structured_jsonl_and_flat_csv(tmp_path):
         "dtype_key": "bf16-bf16-bf16",
         "gpu": "0",
         "gpu_name": "Fake GPU",
-        "gpu_key": "nvidia-fake-sm90",
+        "platform_key": "nvidia-h20",
         "worker_id": 0,
         "cache_hit": False,
         "first_call_ms": 1.234567891,
@@ -657,7 +667,7 @@ def test_write_outputs_keeps_structured_jsonl_and_flat_csv(tmp_path):
             "model_dtype_key",
             "gpu",
             "gpu_name",
-            "model_gpu_key",
+            "model_platform_key",
             "worker_index",
             "status",
             "tuning_cache_hit",
@@ -695,6 +705,10 @@ def test_write_outputs_keeps_structured_jsonl_and_flat_csv(tmp_path):
     assert json_rows[0]["config_search"]["best_config"] == {"BLOCK_M": 16}
     assert json_rows[0]["config_search"]["cached_count"] == 9
     assert json_rows[0]["config_search"]["measured_count"] == 3
+    assert json_rows[0]["model_identity"] == {
+        "platform_key": "nvidia-h20",
+        "dtype_key": "bf16-bf16-bf16",
+    }
     assert json_rows[0]["execution"]["first_call_ms"] == 1.234568
     assert json_rows[0]["execution"]["benchmark_protocol"]["resolved_mode"] == "replay"
     assert json_rows[0]["execution"]["latency_measurement"] == {
@@ -710,6 +724,7 @@ def test_write_outputs_keeps_structured_jsonl_and_flat_csv(tmp_path):
     assert csv_rows[0]["schema_version"] == "3"
     assert csv_rows[0]["input_row_index"] == "0"
     assert csv_rows[0]["Count"] == "7"
+    assert csv_rows[0]["model_platform_key"] == "nvidia-h20"
     assert json.loads(csv_rows[0]["best_config"]) == {"BLOCK_M": 16}
     assert csv_rows[0]["cached_count"] == "9"
     assert csv_rows[0]["measured_count"] == "3"
@@ -728,6 +743,109 @@ def test_write_outputs_keeps_structured_jsonl_and_flat_csv(tmp_path):
     assert csv_rows[1]["measured_count"] == ""
     assert "selected_index" not in csv_rows[0]
     assert "shape_key" not in csv_rows[0]
+
+
+def test_worker_success_and_failure_rows_use_platform_key(monkeypatch):
+    """Keep the private worker identity field aligned in both result branches."""
+    from flag_gems.flagtune.runtime import executor as executor_mod
+
+    libentry_mod = importlib.import_module("flag_gems.utils.libentry")
+
+    class FakeConfig:
+        pre_hook = None
+
+        @staticmethod
+        def all_kwargs():
+            return {"BLOCK": 16}
+
+    class FakeTuner:
+        def __init__(self):
+            self.configs = [FakeConfig()]
+            self.strategy = []
+            self.do_bench = lambda _call, _quantiles: [1.0, 0.9, 1.1]
+
+        def apply_flagtune(self):
+            return None
+
+        def _set_configs_and_strategy(self, configs, strategy):
+            self.configs = configs
+            self.strategy = strategy
+
+        @contextmanager
+        def use_benchmark_protocol(self, *_args):
+            yield SimpleNamespace(as_dict=lambda: {"resolved_mode": "event"})
+
+        @contextmanager
+        def use_run_mode(self, _mode):
+            yield
+
+    tuner = FakeTuner()
+    worker = executor_mod.BenchmarkWorker.__new__(executor_mod.BenchmarkWorker)
+    worker.spec = SimpleNamespace(
+        source_sha256="sha256",
+        op_id="flaggems/mm",
+        public_operator_name="mm",
+        shape=SimpleNamespace(identity=("M",)),
+    )
+    worker.base_states = {}
+    worker.device_runtime = SimpleNamespace(
+        dtype=lambda name: name,
+        synchronize=lambda: None,
+        descriptor=SimpleNamespace(device_name="NVIDIA H20-3e"),
+        metadata=lambda _index=0: {
+            "backend": "cuda",
+            "vendor": "NVIDIA",
+            "device_name": "NVIDIA H20-3e",
+            "architecture": "sm90",
+            "platform_key": "nvidia-h20",
+        },
+    )
+    worker._find_tuner = lambda _variant: (object(), tuner)
+    worker._make_tensors = lambda _values, _dtypes: {}
+    worker._benchmark_selected_config = lambda **_kwargs: (0.9, 1.0, 1.1)
+
+    def invoke(_tensors):
+        tuner.best_config = tuner.configs[0]
+        return SimpleNamespace(dtype="bfloat16")
+
+    worker._invoke = invoke
+    monkeypatch.setattr(libentry_mod, "clear_libentry_dispatch_cache", lambda _k: None)
+    payload = {
+        "config_sha256": "sha256",
+        "source_index": 0,
+        "selected_index": 0,
+        "variant": "general",
+        "values": {"M": 16},
+        "count": 1,
+        "configs": None,
+    }
+
+    success = worker.benchmark(
+        payload,
+        dtype_names=["bfloat16"],
+        warmup=1,
+        iterations=1,
+        benchmark_mode="event",
+        benchmark_retries=1,
+        tuning_run_mode="normal",
+        latency_warmup=1,
+        latency_iterations=1,
+        latency_trials=1,
+        gpu_token="0",
+        worker_id=0,
+    )
+    failure = worker.failure_result(
+        payload,
+        dtype_names=["bfloat16"],
+        gpu_token="0",
+        worker_id=0,
+        exc=RuntimeError("failed"),
+    )
+
+    assert success["platform_key"] == "nvidia-h20"
+    assert "gpu_key" not in success
+    assert failure["platform_key"] is None
+    assert "gpu_key" not in failure
 
 
 def test_generic_scheduler_prepares_cases_from_operator_yaml():

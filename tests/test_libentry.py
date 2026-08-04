@@ -478,11 +478,13 @@ def test_flagtree_policy_is_default_when_use_flagtune_is_disabled(monkeypatch):
     monkeypatch.setattr(flagtune_runtime_mod, "_include_ops", None)
     monkeypatch.setattr(libentry_mod, "_flagtune_available", lambda: (True, None))
     monkeypatch.setattr(libentry_mod, "_flagtune_enabled", lambda: True)
-    monkeypatch.setattr(
-        libentry_mod,
-        "_ensure_flagtune_proposer",
-        lambda _identity: (fake_proposer, FakeVariantInfo()),
-    )
+    observed_identity = {}
+
+    def fake_ensure(identity):
+        observed_identity["value"] = identity
+        return fake_proposer, FakeVariantInfo()
+
+    monkeypatch.setattr(libentry_mod, "_ensure_flagtune_proposer", fake_ensure)
 
     best_config, timings = LibTuner.get("flagtune").policy(
         FakeTuner(),
@@ -493,8 +495,134 @@ def test_flagtree_policy_is_default_when_use_flagtune_is_disabled(monkeypatch):
     )
 
     assert proposer_called is True
+    assert observed_identity["value"].platform_key == "nvidia-h20"
     assert best_config.kwargs["BLOCK"] == 1
     assert list(timings.values()) == [1.0]
+
+
+@pytest.mark.parametrize(
+    "failure_stage, message",
+    [
+        ("identity", "identity contract failed"),
+        ("init", "package contract failed"),
+        ("inputs", "input contract failed"),
+        ("proposer", "proposer contract failed"),
+        ("benchmark", "candidate benchmark failed"),
+    ],
+)
+def test_enabled_flagtree_policy_propagates_contract_failures(
+    monkeypatch, failure_stage, message
+):
+    """Only explicit disablement may select the exhaustive default policy."""
+
+    class FakeVariantInfo:
+        param_names = ["BLOCK"]
+
+        @staticmethod
+        def normalize_inputs(_nargs):
+            if failure_stage == "inputs":
+                raise RuntimeError(message)
+            return {"M": 16}
+
+        @staticmethod
+        def to_config(config_dict):
+            return triton.Config({"BLOCK": int(config_dict["BLOCK"])})
+
+    class FakeTuner:
+        _flagtune_op_name = None
+        _flagtune_op_id = "flaggems/mm"
+        _flagtune_variant = "gemv"
+        _flagtune_pre_hook = None
+        arg_names = ["M"]
+        nargs = {"M": 16}
+
+        @staticmethod
+        def _flagtune_dtype_resolver(_arguments):
+            if failure_stage == "identity":
+                raise RuntimeError(message)
+            return ("bfloat16", "bfloat16", "bfloat16")
+
+    def proposer(_bench, _shape, _initial, _meta):
+        if failure_stage == "proposer":
+            raise RuntimeError(message)
+        return [{"BLOCK": 1}]
+
+    def ensure(_identity):
+        if failure_stage == "init":
+            raise RuntimeError(message)
+        return proposer, FakeVariantInfo()
+
+    def bench(config):
+        if failure_stage == "benchmark" and config.kwargs["BLOCK"] == 1:
+            raise RuntimeError(message)
+        return [float(config.kwargs["BLOCK"])]
+
+    monkeypatch.setattr(libentry_mod, "_flagtune_enabled", lambda: True)
+    monkeypatch.setattr(libentry_mod, "_flagtune_available", lambda: (True, None))
+    monkeypatch.setattr(libentry_mod, "_ensure_flagtune_proposer", ensure)
+    monkeypatch.setattr(
+        "triton.flagtune.contract.identity.discover_gpu_metadata",
+        lambda: {"platform_key": "nvidia-h20"},
+    )
+
+    with pytest.raises(RuntimeError, match=message):
+        LibTuner.get("flagtune").policy(
+            FakeTuner(),
+            bench,
+            [triton.Config({"BLOCK": 8})],
+            (),
+            {},
+        )
+
+
+def test_flagtree_proposer_cache_tracks_resolved_model_version(monkeypatch):
+    """Refresh local proposer/variant pairs when the shared manager resolves a new version."""
+    from triton.flagtune.runtime import proposer as proposer_mod
+
+    class Identity:
+        platform_key = "nvidia-h20"
+        op_id = "flaggems/mm"
+        variant = "general_tma"
+        dtype_key = "bf16-bf16-bf16"
+
+    identity = Identity()
+    variants = [object(), object()]
+    loaded = iter(
+        (
+            SimpleNamespace(model_version="1.0.0", variant=variants[0]),
+            SimpleNamespace(model_version="1.1.0", variant=variants[1]),
+        )
+    )
+    calls = []
+
+    def fake_load(op_id, variant, **kwargs):
+        calls.append(("load", op_id, variant, kwargs))
+        return next(loaded)
+
+    def fake_make(op_id, variant, **kwargs):
+        calls.append(("make", op_id, variant, kwargs))
+        return object()
+
+    monkeypatch.setattr(libentry_mod, "_FLAGTUNE_PROPOSER_POOL", {})
+    monkeypatch.setattr(libentry_mod, "_FLAGTUNE_VARIANT_INFO_POOL", {})
+    monkeypatch.setattr(proposer_mod, "load_model_bundle", fake_load)
+    monkeypatch.setattr(proposer_mod, "make_config_proposer", fake_make)
+
+    first = libentry_mod._ensure_flagtune_proposer(identity)
+    second = libentry_mod._ensure_flagtune_proposer(identity)
+
+    assert first[0] is not second[0]
+    assert first[1] is variants[0]
+    assert second[1] is variants[1]
+    assert [call[0] for call in calls] == ["load", "make", "load", "make"]
+    assert all(
+        call[3]
+        == {
+            "platform_key": "nvidia-h20",
+            "dtype_key": "bf16-bf16-bf16",
+        }
+        for call in calls
+    )
 
 
 def test_flagtree_policy_is_bypassed_when_triton_flagtune_is_disabled(monkeypatch):

@@ -56,6 +56,8 @@ def make_row(source_index, tuning, latency, M="16", status="ok"):
         "K": "64",
         "Count": "7",
         "dtype": "bfloat16",
+        "dtype_key": "bf16-bf16-bf16",
+        "platform_key": "nvidia-h20",
         "status": status,
         "cache_hit": "False",
         "tuning_time_ms": str(tuning),
@@ -93,6 +95,7 @@ def make_v2_row(input_row_index, tuning, latency):
         "input_dtypes": '["bfloat16","bfloat16"]',
         "output_dtypes": '["bfloat16"]',
         "model_dtype_key": "bf16-bf16-bf16",
+        "model_platform_key": "nvidia-h20",
         "status": "ok",
         "tuning_cache_hit": "false",
         "tuning_time_ms": str(tuning),
@@ -191,6 +194,18 @@ def test_reads_v2_rows_and_rounds_only_serialized_metrics():
     assert row["relative_throughput_pct"] == "106.832"
     assert row["baseline_cached_count"] == "10"
     assert row["ours_measured_count"] == "0"
+
+
+def test_private_rows_map_platform_key_to_public_model_column():
+    """Normalize the private platform field to its public column name."""
+    mod = load_module()
+    source = make_row(0, 1, 1)
+    source["platform_key"] = "nvidia-h20"
+
+    rows, fields = mod._normalize_schema([source], list(source))
+
+    assert rows[0]["model_platform_key"] == "nvidia-h20"
+    assert "model_platform_key" in fields
 
 
 def test_v3_requires_identical_benchmark_protocols():
@@ -306,9 +321,35 @@ def test_cli_writes_baseline_and_ours_columns(tmp_path):
     assert row["ours_tuning_time_ms"] == "2.000000"
     assert row["tuning_speedup"] == "4.000"
     assert row["relative_throughput_pct"] == "133.333"
+    assert row["model_platform_key"] == "nvidia-h20"
     assert json_row["schema_version"] == 3
+    assert json_row["model_identity"] == {
+        "platform_key": "nvidia-h20",
+        "dtype_key": "bf16-bf16-bf16",
+    }
     assert json_row["comparison"]["tuning_speedup"] == 4.0
     assert json_row["comparison"]["relative_throughput_pct"] == 133.333
+
+
+def test_rejects_cross_platform_comparison():
+    """Platform is part of model identity, not incidental device metadata."""
+    mod = load_module()
+    baseline = make_v3_row(0, 2, 1)
+    ours = make_v3_row(0, 1, 1)
+    ours["model_platform_key"] = "nvidia-h800"
+
+    with pytest.raises(mod.ComparisonError, match="model_platform_key"):
+        compare(mod, [baseline], [ours])
+
+
+def test_comparison_requires_platform_identity():
+    mod = load_module()
+    baseline = make_v3_row(0, 2, 1)
+    ours = make_v3_row(0, 1, 1)
+    del ours["model_platform_key"]
+
+    with pytest.raises(mod.ComparisonError, match="model_platform_key"):
+        compare(mod, [baseline], [ours])
 
 
 def test_non_mm_dimensions_are_preserved_in_csv_and_jsonl(tmp_path):

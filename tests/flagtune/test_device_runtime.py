@@ -108,6 +108,22 @@ def test_runtime_rejects_missing_or_empty_device_api():
         runtime.device_count()
 
 
+def test_runtime_metadata_keeps_architecture_separate_from_platform(monkeypatch):
+    runtime = DeviceRuntime(_descriptor(), _FakeTorch(_FakeDeviceAPI()))
+    monkeypatch.setattr(
+        "flag_gems.flagtune.runtime.device.probe_flagtune_device",
+        lambda _index=0: _descriptor(),
+    )
+
+    assert runtime.metadata() == {
+        "backend": "cuda",
+        "vendor": "nvidia",
+        "device_name": "Test GPU",
+        "architecture": "sm90",
+        "platform_key": "nvidia-test-gpu",
+    }
+
+
 def test_runtime_resolves_benchmark_only_through_triton_boundary(monkeypatch):
     runtime = DeviceRuntime(_descriptor(), _FakeTorch(_FakeDeviceAPI()))
     observed = {}
@@ -119,7 +135,7 @@ def test_runtime_resolves_benchmark_only_through_triton_boundary(monkeypatch):
         return sentinel
 
     monkeypatch.setattr(
-        "triton.runtime.benchmark.resolve_benchmarker",
+        "triton.runtime.benchmark_protocol.resolve_benchmarker",
         fake_resolve,
     )
 

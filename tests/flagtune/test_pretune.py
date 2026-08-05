@@ -38,7 +38,9 @@ pytest.importorskip(
 )
 
 
-@pytest.mark.parametrize("converter", [reporting_schema.pretune_json_row, reporting_schema.pretune_csv_row])
+@pytest.mark.parametrize(
+    "converter", [reporting_schema.pretune_json_row, reporting_schema.pretune_csv_row]
+)
 def test_report_conversion_requires_platform_identity(converter):
     with pytest.raises(reporting_schema.ReportSchemaError, match="platform_key"):
         converter({"dtype_key": "bf16-bf16-bf16"}, ["M"])

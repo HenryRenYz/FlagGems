@@ -1067,10 +1067,7 @@ def _ensure_flagtune_proposer(identity):
         and version selection. Loading first exposes the resolved version, so a
         newly selected package receives a fresh local proposer/variant pair.
     """
-    from triton.flagtune.runtime.proposer import (
-        load_model_bundle,
-        make_config_proposer,
-    )
+    from triton.flagtune.runtime.proposer import load_model_bundle, make_config_proposer
 
     loaded = load_model_bundle(
         identity.op_id,
@@ -1207,7 +1204,9 @@ def flagtune_policy(
         return LibTuner.get("default").policy(self, bench_fn, configs, args, kwargs)
     available, exc = _flagtune_available()
     if not available:
-        raise RuntimeError("FlagTune is enabled but the FlagTree runtime is unavailable") from exc
+        raise RuntimeError(
+            "FlagTune is enabled but the FlagTree runtime is unavailable"
+        ) from exc
 
     op_id = self._flagtune_op_id
     variant = self._flagtune_variant

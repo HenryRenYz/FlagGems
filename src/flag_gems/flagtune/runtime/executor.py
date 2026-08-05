@@ -953,6 +953,8 @@ class BenchmarkWorker:
         values = dict(payload["values"])
         shape = [values[name] for name in self.spec.shape.identity]
         configs = payload.get("configs")
+        device_name = self.device_runtime.descriptor.device_name
+        gpu = self.device_runtime.metadata(0)
         return {
             "source_index": payload["source_index"],
             "selected_index": payload["selected_index"],
@@ -967,9 +969,9 @@ class BenchmarkWorker:
             "output_dtypes": [],
             "dtype_key": None,
             "gpu": gpu_token,
-            "gpu_name": None,
-            "platform_key": None,
-            "gpu_metadata": None,
+            "gpu_name": device_name,
+            "platform_key": gpu["platform_key"],
+            "gpu_metadata": gpu,
             "worker_id": worker_id,
             "status": "failed",
             "cache_hit": None,

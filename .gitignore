@@ -42,4 +42,4 @@ tests/*.json
 docs/benchmark/
 
 # Local outputs from FlagTune
-/flagtune-pretune-output/
+/flagtune*/

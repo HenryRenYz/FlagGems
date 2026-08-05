@@ -27,8 +27,10 @@ Environment variables:
     ``FLAGTUNE_INCLUDE`` remain their compatibility aliases.
   * ``FLAGTUNE_ENABLE``, ``FLAGTUNE_DISABLE_OPS``,
     ``FLAGTUNE_TOP_K``, ``FLAGTUNE_MODEL_DIR``,
-    ``FLAGTUNE_MODEL_CACHE``, and ``FLAGTUNE_DISABLE_REMOTE`` are passed to
-    FlagTree's proposer/model-resolution path unchanged and recorded for audit.
+    ``FLAGTUNE_MODEL_CACHE``, ``FLAGTUNE_LOCAL_MANIFEST``,
+    ``FLAGTUNE_MODEL_VERSION``, ``FLAGTUNE_MODEL_DOWNLOAD_LATEST``, and
+    ``FLAGTUNE_DISABLE_REMOTE`` are passed to FlagTree's proposer/model-resolution
+    path unchanged and recorded for audit.
 
 Dry runs print a JSON plan and create nothing. Real runs create timestamped
 CSV, JSONL, manifest, and combined-log artifacts while LibTuner uses the chosen
@@ -104,6 +106,9 @@ STRATEGY_ENV_NAMES = (
     "FLAGTUNE_TOP_K",
     "FLAGTUNE_MODEL_DIR",
     "FLAGTUNE_MODEL_CACHE",
+    "FLAGTUNE_LOCAL_MANIFEST",
+    "FLAGTUNE_MODEL_VERSION",
+    "FLAGTUNE_MODEL_DOWNLOAD_LATEST",
     "FLAGTUNE_DISABLE_REMOTE",
     "CUDA_VISIBLE_DEVICES",
     "ROCR_VISIBLE_DEVICES",

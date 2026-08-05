@@ -77,6 +77,21 @@ def load_benchmark_module():
     return load_path(BENCHMARK_PATH, "flag_gems_flagnbench")
 
 
+def test_environment_snapshot_records_model_resolution_controls(monkeypatch):
+    mod = load_module()
+    expected = {
+        "FLAGTUNE_LOCAL_MANIFEST": "/tmp/flagtune-manifest.json",
+        "FLAGTUNE_MODEL_VERSION": "1.0.0",
+        "FLAGTUNE_MODEL_DOWNLOAD_LATEST": "1",
+    }
+    for name, value in expected.items():
+        monkeypatch.setenv(name, value)
+
+    snapshot = mod.environment_snapshot()
+
+    assert {name: snapshot[name] for name in expected} == expected
+
+
 class FakeVariant:
     """Represent a registry variant controlled by a shape predicate."""
 
@@ -745,7 +760,7 @@ def test_write_outputs_keeps_structured_jsonl_and_flat_csv(tmp_path):
     assert "shape_key" not in csv_rows[0]
 
 
-def test_worker_success_and_failure_rows_use_platform_key(monkeypatch):
+def test_worker_success_and_failure_rows_use_platform_key(monkeypatch, tmp_path):
     """Keep the private worker identity field aligned in both result branches."""
     from flag_gems.flagtune.runtime import executor as executor_mod
 
@@ -844,8 +859,15 @@ def test_worker_success_and_failure_rows_use_platform_key(monkeypatch):
 
     assert success["platform_key"] == "nvidia-h20"
     assert "gpu_key" not in success
-    assert failure["platform_key"] is None
+    assert failure["gpu_name"] == "NVIDIA H20-3e"
+    assert failure["platform_key"] == "nvidia-h20"
+    assert failure["gpu_metadata"]["architecture"] == "sm90"
     assert "gpu_key" not in failure
+    assert reporting_schema.pretune_json_row(failure, ["M"])["model_identity"] == {
+        "platform_key": "nvidia-h20",
+        "dtype_key": None,
+    }
+    load_module().write_outputs(tmp_path, [failure], ["M"])
 
 
 def test_generic_scheduler_prepares_cases_from_operator_yaml():

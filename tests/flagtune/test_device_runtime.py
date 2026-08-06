@@ -135,7 +135,7 @@ def test_runtime_resolves_benchmark_only_through_triton_boundary(monkeypatch):
         return sentinel
 
     monkeypatch.setattr(
-        "triton.runtime.benchmark_protocol.resolve_benchmarker",
+        "triton.flagtune.runtime.benchmark_protocol.resolve_benchmarker",
         fake_resolve,
     )
 

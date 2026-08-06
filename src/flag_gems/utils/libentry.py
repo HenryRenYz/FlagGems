@@ -46,7 +46,7 @@ from typing import (
 )
 
 import triton
-from triton.runtime.benchmark_protocol import (
+from triton.flagtune.runtime.benchmark_protocol import (
     BenchmarkMode,
     BenchmarkProtocol,
     resolve_benchmarker,

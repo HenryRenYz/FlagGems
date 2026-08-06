@@ -215,14 +215,17 @@ Documentation = "https://flagos-ai.github.io/FlagGems"
 "Bug Tracker" = "https://github.com/flagos-ai/FlagGems/issues"
 
 [project.scripts]
-flaggems-setup = "flag_gems._setup:main"
-flaggems-flagtune-pretune = "flag_gems.flagtune.cli.pretune:main"
-flaggems-flagtune-train = "flag_gems.flagtune.cli.train:main"
-flaggems-flagtune-compare = "flag_gems.flagtune.cli.compare:main"
+# Top-level module (NOT flag_gems._setup): importing the flag_gems package
+# pulls in torch and triton at load time, but this bootstrap CLI runs *before*
+# those are installed, so its entry point must not import the package.
+flaggems-setup = "flaggems_setup:main"
 
 # Package discovery (including shipping the tests/ and benchmark/ suites under
 # collision-safe names) is defined in setup.py, so it is intentionally omitted
 # here — declaring `packages` in both places is an error.
+flaggems-flagtune-pretune = "flag_gems.flagtune.cli.pretune:main"
+flaggems-flagtune-train = "flag_gems.flagtune.cli.train:main"
+flaggems-flagtune-compare = "flag_gems.flagtune.cli.compare:main"
 
 [tool.setuptools.package-data]
 

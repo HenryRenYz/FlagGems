@@ -15,35 +15,20 @@
 import pytest
 import torch
 
+import flag_gems
+
 from . import base, consts
 
 
-@pytest.mark.hardsigmoid_
-def test_hardsigmoid_inplace():
+@pytest.mark.fix_
+@pytest.mark.skipif(
+    flag_gems.vendor_name == "tsingmicro", reason="Issue #4131: not working"
+)
+def test_fix_():
     bench = base.UnaryPointwiseBenchmark(
-        op_name="hardsigmoid_",
-        torch_op=torch.ops.aten.hardsigmoid_,
+        op_name="fix_",
+        torch_op=torch.Tensor.fix_,
         dtypes=consts.FLOAT_DTYPES,
         is_inplace=True,
-    )
-    bench.run()
-
-
-@pytest.mark.hardsigmoid
-def test_hardsigmoid():
-    bench = base.UnaryPointwiseBenchmark(
-        op_name="hardsigmoid",
-        torch_op=torch.nn.functional.hardsigmoid,
-        dtypes=consts.FLOAT_DTYPES,
-    )
-    bench.run()
-
-
-@pytest.mark.hardsigmoid_out
-def test_hardsigmoid_out():
-    bench = base.UnaryPointwiseOutBenchmark(
-        op_name="hardsigmoid_out",
-        torch_op=torch.ops.aten.hardsigmoid.out,
-        dtypes=consts.FLOAT_DTYPES,
     )
     bench.run()

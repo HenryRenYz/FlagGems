@@ -80,6 +80,15 @@ version = triton.__version__.split(".")
 major_version, minor_version = eval(version[0]), eval(version[1])
 
 
+def _supports_flagtune_cost_model(tuner: Any) -> bool:
+    """Return whether one tuner can use the installed FlagTree Cost Model."""
+    return (
+        _HAS_FLAGTREE_FLAGTUNE
+        and getattr(tuner, "_flagtune_op_id", None) is not None
+        and getattr(tuner, "_flagtune_variant", None) is not None
+    )
+
+
 class LibTunerRunMode(str, Enum):
     """Control one scoped :class:`LibTuner.run` config-selection pass."""
 
@@ -553,9 +562,7 @@ class LibTuner(triton.runtime.Autotuner):
         self.cache = libcache[self.config_table_name]
 
     def apply_flagtune(self):
-        supports_cost_model = (
-            self._flagtune_op_id is not None and self._flagtune_variant is not None
-        )
+        supports_cost_model = _supports_flagtune_cost_model(self)
         if self._flagtune_op_name is None and not supports_cost_model:
             return False
 
@@ -1235,9 +1242,7 @@ def flagtune_policy(
     configs = list(configs)
     op_id = getattr(self, "_flagtune_op_id", None)
     variant = getattr(self, "_flagtune_variant", None)
-    supports_cost_model = (
-        _HAS_FLAGTREE_FLAGTUNE and op_id is not None and variant is not None
-    )
+    supports_cost_model = _supports_flagtune_cost_model(self)
     op_name = (
         getattr(self, "_flagtune_op_name", None)
         or getattr(self, "_flagtune_expand_op_name", None)

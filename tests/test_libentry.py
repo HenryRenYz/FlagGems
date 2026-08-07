@@ -178,6 +178,7 @@ def test_adapted_libtuner_switches_default_expanded_and_cost_model(monkeypatch):
             self._flagtune_mode = flagtune_runtime_mod.TuningMode(mode)
 
     monkeypatch.setattr(flagtune_runtime_mod, "_include_ops", None)
+    monkeypatch.setattr(libentry_mod, "_HAS_FLAGTREE_FLAGTUNE", True)
     monkeypatch.delenv("FLAGTUNE_INCLUDE", raising=False)
     monkeypatch.delenv("USE_FLAGTUNE", raising=False)
     monkeypatch.delenv("USE_FLAGTUNE_COST_MODEL", raising=False)
@@ -211,6 +212,79 @@ def test_adapted_libtuner_switches_default_expanded_and_cost_model(monkeypatch):
     assert LibTuner.apply_flagtune(tuner) is True
     assert tuner._flagtune_mode is flagtune_runtime_mod.TuningMode.DEFAULT
     assert tuner.configs is default_configs
+
+
+@pytest.mark.parametrize(
+    ("use_flagtune", "use_cost_model", "expected_mode", "use_expanded_configs"),
+    [
+        (None, None, "default", False),
+        (None, "0", "default", False),
+        (None, "1", "default", False),
+        ("0", "0", "default", False),
+        ("1", None, "expanded", True),
+        ("1", "0", "expanded", True),
+        ("1", "1", "expanded", True),
+    ],
+)
+def test_official_triton_libtuner_uses_unadapted_routes(
+    monkeypatch,
+    use_flagtune,
+    use_cost_model,
+    expected_mode,
+    use_expanded_configs,
+):
+    """Ignore Cost Model annotations when the FlagTree runtime is unavailable."""
+    default_configs = [object()]
+    expanded_configs = [object(), object()]
+
+    class FakeTuner:
+        __name__ = "mm"
+        _flagtune_op_name = "mm"
+        _flagtune_expand_op_name = "mm_general_tma"
+        _flagtune_op_id = "flaggems/mm"
+        _flagtune_variant = "general_tma"
+        _flagtune_yaml_path = None
+        _flagtune_pre_hook = None
+        _flagtune_default_configs = default_configs
+        _flagtune_default_strategy = "default_strategy"
+        _flagtune_mode = flagtune_runtime_mod.TuningMode.DEFAULT
+        _flagtune_warned = False
+        configs = default_configs
+
+        def _set_configs_and_strategy(self, configs, strategy, *, mode=None):
+            self.configs = configs
+            self.strategy = strategy
+            self._flagtune_mode = flagtune_runtime_mod.TuningMode(mode)
+
+    monkeypatch.setattr(libentry_mod, "_HAS_FLAGTREE_FLAGTUNE", False)
+    monkeypatch.setattr(flagtune_runtime_mod, "_include_ops", None)
+    monkeypatch.delenv("FLAGTUNE_INCLUDE", raising=False)
+    if use_flagtune is None:
+        monkeypatch.delenv("USE_FLAGTUNE", raising=False)
+    else:
+        monkeypatch.setenv("USE_FLAGTUNE", use_flagtune)
+    if use_cost_model is None:
+        monkeypatch.delenv("USE_FLAGTUNE_COST_MODEL", raising=False)
+    else:
+        monkeypatch.setenv("USE_FLAGTUNE_COST_MODEL", use_cost_model)
+    monkeypatch.setattr(
+        libentry_mod.runtime,
+        "get_expand_config",
+        lambda *_args, **_kwargs: {"strategy": "expanded_strategy"},
+    )
+    monkeypatch.setattr(
+        libentry_mod.runtime,
+        "ops_get_configs",
+        lambda *_args, **_kwargs: expanded_configs,
+    )
+    tuner = FakeTuner()
+
+    changed = LibTuner.apply_flagtune(tuner)
+
+    assert changed is use_expanded_configs
+    assert tuner._flagtune_mode.value == expected_mode
+    expected_configs = expanded_configs if use_expanded_configs else default_configs
+    assert tuner.configs is expected_configs
 
 
 def softmax_inner_decorator_cascade(x, dim, dtype=None):

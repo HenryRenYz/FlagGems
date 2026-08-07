@@ -32,8 +32,9 @@ import yaml
 
 from flag_gems.flagtune.reporting import schema as reporting_schema
 
-pytest.importorskip(
-    "triton.flagtune",
+HAS_FLAGTREE_FLAGTUNE = importlib.util.find_spec("triton.flagtune") is not None
+pytestmark = pytest.mark.skipif(
+    not HAS_FLAGTREE_FLAGTUNE,
     reason="FlagGems FlagTune Pretune tests require the optional FlagTree package",
 )
 

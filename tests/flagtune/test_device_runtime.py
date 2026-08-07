@@ -1,23 +1,26 @@
 """Validate the strict FlagTune device-operation adapter in its focused suite."""
 
+import importlib.util
 from types import SimpleNamespace
 
 import pytest
 
-pytest.importorskip(
-    "triton.flagtune",
+HAS_FLAGTREE_FLAGTUNE = importlib.util.find_spec("triton.flagtune") is not None
+pytestmark = pytest.mark.skipif(
+    not HAS_FLAGTREE_FLAGTUNE,
     reason="FlagGems FlagTune device-adapter tests require the optional FlagTree package",
 )
 
-from triton.flagtune.runtime.device import (  # noqa: E402
-    DeviceDescriptor,
-    DeviceProbeError,
-)
+if HAS_FLAGTREE_FLAGTUNE:
+    from triton.flagtune.runtime.device import (  # noqa: E402
+        DeviceDescriptor,
+        DeviceProbeError,
+    )
 
-from flag_gems.flagtune.runtime.device import (  # noqa: E402
-    DeviceRuntime,
-    DeviceUnavailableError,
-)
+    from flag_gems.flagtune.runtime.device import (  # noqa: E402
+        DeviceRuntime,
+        DeviceUnavailableError,
+    )
 
 
 class _FakeDeviceAPI:

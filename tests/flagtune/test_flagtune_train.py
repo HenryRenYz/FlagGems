@@ -16,8 +16,9 @@ from types import SimpleNamespace
 
 import pytest
 
-pytest.importorskip(
-    "triton.flagtune",
+HAS_FLAGTREE_FLAGTUNE = importlib.util.find_spec("triton.flagtune") is not None
+pytestmark = pytest.mark.skipif(
+    not HAS_FLAGTREE_FLAGTUNE,
     reason="FlagGems offline FlagTune training tests require the optional FlagTree package",
 )
 

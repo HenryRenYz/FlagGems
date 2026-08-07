@@ -44,6 +44,10 @@ from flag_gems.utils.libentry import (
 libentry_mod = importlib.import_module("flag_gems.utils.libentry")
 flagtune_runtime_mod = importlib.import_module("flag_gems.runtime.flagtune")
 HAS_FLAGTREE_FLAGTUNE = importlib.util.find_spec("triton.flagtune") is not None
+requires_flagtree_flagtune = pytest.mark.skipif(
+    not HAS_FLAGTREE_FLAGTUNE,
+    reason="test requires the optional FlagTree FlagTune package",
+)
 
 
 # not_raises is copied from https://gist.github.com/oisinmulvihill/45c14271fad7794a4a52516ecb784e69
@@ -563,6 +567,45 @@ def test_flagtree_policy_is_bypassed_when_expanded_flagtune_is_enabled(monkeypat
     assert called is False
 
 
+def test_official_triton_treats_model_annotation_as_unadapted(monkeypatch):
+    """Keep default tuning usable when official Triton has no Cost Model."""
+
+    class FakeTuner:
+        _flagtune_expand_op_name = "mm_general_tma"
+        _flagtune_op_name = "mm"
+        _flagtune_op_id = "flaggems/mm"
+        _flagtune_variant = "general_tma"
+
+    observed = {}
+
+    def resolve_mode(op_name, *, supports_cost_model):
+        observed.update(
+            op_name=op_name,
+            supports_cost_model=supports_cost_model,
+        )
+        return flagtune_runtime_mod.TuningMode.DEFAULT
+
+    def fail_if_called():
+        raise AssertionError("official Triton must not load Cost Model modules")
+
+    monkeypatch.setattr(libentry_mod, "_HAS_FLAGTREE_FLAGTUNE", False)
+    monkeypatch.setattr(libentry_mod.runtime, "resolve_tuning_mode", resolve_mode)
+    monkeypatch.setattr(libentry_mod, "_flagtune_available", fail_if_called)
+
+    best_config, timings = LibTuner.get("flagtune").policy(
+        FakeTuner(),
+        lambda cfg: [cfg.kwargs["BLOCK"]],
+        [triton.Config({"BLOCK": 8})],
+        (),
+        {},
+    )
+
+    assert observed == {"op_name": "mm", "supports_cost_model": False}
+    assert best_config.kwargs["BLOCK"] == 8
+    assert list(timings.values()) == [[8]]
+
+
+@requires_flagtree_flagtune
 def test_flagtree_policy_uses_cost_model_by_default_for_adapted_operator(monkeypatch):
     """Use the model-backed proposer by default for an adapted operator."""
 
@@ -644,6 +687,7 @@ def test_flagtree_policy_uses_cost_model_by_default_for_adapted_operator(monkeyp
         ("benchmark", "candidate benchmark failed"),
     ],
 )
+@requires_flagtree_flagtune
 def test_enabled_flagtree_policy_propagates_contract_failures(
     monkeypatch, failure_stage, message
 ):
@@ -712,6 +756,7 @@ def test_enabled_flagtree_policy_propagates_contract_failures(
         )
 
 
+@requires_flagtree_flagtune
 def test_flagtree_proposer_cache_tracks_resolved_model_version(monkeypatch):
     """Refresh local proposer/variant pairs when the shared manager resolves a new version."""
     from triton.flagtune.runtime import proposer as proposer_mod

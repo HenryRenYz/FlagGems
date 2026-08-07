@@ -46,11 +46,25 @@ from typing import (
 )
 
 import triton
-from triton.flagtune.runtime.benchmark_protocol import (
-    BenchmarkMode,
-    BenchmarkProtocol,
-    resolve_benchmarker,
-)
+
+try:
+    import triton.flagtune  # noqa: F401
+except ModuleNotFoundError as exc:
+    if exc.name != "triton.flagtune":
+        raise
+    _HAS_FLAGTREE_FLAGTUNE = False
+    from flag_gems.flagtune.runtime._benchmark_protocol import (
+        BenchmarkMode,
+        BenchmarkProtocol,
+        resolve_benchmarker,
+    )
+else:
+    _HAS_FLAGTREE_FLAGTUNE = True
+    from triton.flagtune.runtime.benchmark_protocol import (
+        BenchmarkMode,
+        BenchmarkProtocol,
+        resolve_benchmarker,
+    )
 
 from flag_gems import runtime
 from flag_gems.runtime import device, torch_device_fn
@@ -374,6 +388,8 @@ class LibTuner(triton.runtime.Autotuner):
             Expanded for unadapted operators and Cost Model for adapted ones.
             Adapted operators use Cost Model by default, while
             ``USE_FLAGTUNE_COST_MODEL=0`` explicitly selects Expanded.
+            Official Triton has no Cost Model and treats model annotations as
+            unadapted, preserving its Default/Expanded routes.
         """
         selected_benchmark_mode = _select_benchmark_mode(benchmark_mode, use_cuda_graph)
         benchmark_retries = _validate_benchmark_retries(benchmark_retries)
@@ -1209,6 +1225,8 @@ def flagtune_policy(
         ``USE_FLAGTUNE=0`` selects Default. Adapted operators use Cost Model
         when FlagTune is enabled or neither switch is set, while
         ``USE_FLAGTUNE_COST_MODEL=0`` explicitly selects Expanded.
+        Official Triton treats model annotations as unadapted because it does
+        not provide the FlagTree Cost Model runtime.
         Enabled integration and candidate benchmark failures propagate. The
         proposer may invoke ``bench_fn`` before the final selection loop, but
         LibTuner's benchmark cache normally prevents duplicate device
@@ -1217,7 +1235,9 @@ def flagtune_policy(
     configs = list(configs)
     op_id = getattr(self, "_flagtune_op_id", None)
     variant = getattr(self, "_flagtune_variant", None)
-    supports_cost_model = op_id is not None and variant is not None
+    supports_cost_model = (
+        _HAS_FLAGTREE_FLAGTUNE and op_id is not None and variant is not None
+    )
     op_name = (
         getattr(self, "_flagtune_op_name", None)
         or getattr(self, "_flagtune_expand_op_name", None)

@@ -15,20 +15,23 @@
 import os
 import warnings
 from dataclasses import dataclass
+from enum import Enum
 from types import MappingProxyType
 
-FLAGGEMS_FLAGTUNE_EXPANDED_ENV = "FLAGGEMS_FLAGTUNE_EXPANDED"
-FLAGGEMS_FLAGTUNE_INCLUDE_ENV = "FLAGGEMS_FLAGTUNE_INCLUDE"
-LEGACY_USE_FLAGTUNE_ENV = "USE_FLAGTUNE"
-LEGACY_FLAGTUNE_INCLUDE_ENV = "FLAGTUNE_INCLUDE"
-# Keep public constant imports working while all FlagGems-owned code writes the
-# namespaced variables above. The legacy environment names remain read-only
-# compatibility aliases.
-USE_FLAGTUNE_ENV = LEGACY_USE_FLAGTUNE_ENV
-FLAGTUNE_INCLUDE_ENV = LEGACY_FLAGTUNE_INCLUDE_ENV
+USE_FLAGTUNE_ENV = "USE_FLAGTUNE"
+USE_FLAGTUNE_COST_MODEL_ENV = "USE_FLAGTUNE_COST_MODEL"
+FLAGTUNE_INCLUDE_ENV = "FLAGTUNE_INCLUDE"
 
 _flagtune_op_registry = {}
 _include_ops = None
+
+
+class TuningMode(str, Enum):
+    """Runtime configuration-selection path for one LibTuner operator."""
+
+    DEFAULT = "default"
+    EXPANDED = "expanded"
+    COST_MODEL = "cost_model"
 
 
 @dataclass(frozen=True)
@@ -115,27 +118,33 @@ def _normalize_include(include):
     return ops
 
 
-def _environment_value(canonical_name, legacy_name):
-    """Read a namespaced FlagGems setting, falling back to its legacy alias."""
-    value = os.environ.get(canonical_name)
-    return value if value is not None else os.environ.get(legacy_name)
+def _optional_binary_environment(name):
+    """Return an optional 0/1 environment setting with strict validation."""
+    value = os.environ.get(name)
+    if value is None:
+        return None
+    value = value.strip()
+    if value not in {"0", "1"}:
+        raise ValueError(f"{name} must be 0 or 1 when set")
+    return value == "1"
+
+
+def _expanded_setting_from_env():
+    """Return the explicit expanded-space selection."""
+    return _optional_binary_environment(USE_FLAGTUNE_ENV)
 
 
 def _expanded_from_env():
-    """Return legacy expanded-search enablement with canonical-name priority."""
-    return (
-        _environment_value(FLAGGEMS_FLAGTUNE_EXPANDED_ENV, LEGACY_USE_FLAGTUNE_ENV)
-        == "1"
-    )
+    """Return whether expanded search is explicitly enabled."""
+    return _expanded_setting_from_env() is True
 
 
 def flagtune_expanded_enabled():
-    """Return whether the global legacy expanded search is enabled.
+    """Return whether global expanded search is enabled.
 
     This intentionally excludes per-operator include-list selection. It keeps
-    old decorators that historically recognized only ``USE_FLAGTUNE=1`` on
-    their exact global-enable semantics while moving them to the namespaced
-    canonical environment variable.
+    decorators that recognize only ``USE_FLAGTUNE=1`` on their exact global
+    enable semantics.
     """
     return _expanded_from_env()
 
@@ -146,19 +155,16 @@ def flagtune(include=None):
     Passing include=None enables the registry's default operators. Passing a
     string or iterable selects the registered operators that should use
     expanded tuning spaces when their LibTuner runs. This API only updates the
-    explicit include list; setting ``FLAGGEMS_FLAGTUNE_EXPANDED=1`` enables
-    every registered FlagTune operator. The old ``USE_FLAGTUNE`` name remains
-    a compatibility alias for that legacy expanded-search mechanism.
+    explicit include list; setting ``USE_FLAGTUNE=1`` enables every registered
+    FlagTune operator.
     """
     global _include_ops
     _include_ops = _normalize_include(include)
-    os.environ[FLAGGEMS_FLAGTUNE_INCLUDE_ENV] = ",".join(sorted(_include_ops))
+    os.environ[FLAGTUNE_INCLUDE_ENV] = ",".join(sorted(_include_ops))
 
 
 def _include_from_env():
-    include = _environment_value(
-        FLAGGEMS_FLAGTUNE_INCLUDE_ENV, LEGACY_FLAGTUNE_INCLUDE_ENV
-    )
+    include = os.environ.get(FLAGTUNE_INCLUDE_ENV)
     if include is None:
         return frozenset()
     try:
@@ -174,14 +180,50 @@ def get_flagtune_include():
     return _include_from_env()
 
 
-def flagtune_enabled(op_name):
+def resolve_tuning_mode(op_name, *, supports_cost_model=False):
+    """Resolve Default, Expanded, or Cost Model tuning for one operator.
+
+    ``USE_FLAGTUNE`` retains its historical meaning whenever it is explicitly
+    set: ``0`` selects the default config space and ``1`` selects the expanded
+    config space. With no explicit legacy selection, an unadapted operator
+    defaults to Expanded and an adapted operator defaults to Cost Model tuning.
+    ``USE_FLAGTUNE_COST_MODEL=0`` lets an adapted operator opt out to expanded
+    tuning, while enabling both paths is rejected.
+    """
     try:
-        op_name = _normalize_op_name(op_name)
+        name = _normalize_op_name(op_name)
     except (TypeError, ValueError):
-        return False
+        return TuningMode.DEFAULT
+
+    expanded_setting = _expanded_setting_from_env()
+    cost_model_setting = None
+    if supports_cost_model:
+        cost_model_setting = _optional_binary_environment(USE_FLAGTUNE_COST_MODEL_ENV)
+        if expanded_setting is True and cost_model_setting is True:
+            raise RuntimeError(
+                "USE_FLAGTUNE=1 and USE_FLAGTUNE_COST_MODEL=1 cannot be "
+                "enabled together for a Cost Model adapted operator"
+            )
+
+    if expanded_setting is False:
+        return TuningMode.DEFAULT
+    if expanded_setting is True:
+        return TuningMode.EXPANDED
+    if name in get_flagtune_include():
+        return TuningMode.EXPANDED
+    if supports_cost_model:
+        if cost_model_setting is False:
+            return TuningMode.EXPANDED
+        return TuningMode.COST_MODEL
+    return TuningMode.EXPANDED
+
+
+def flagtune_enabled(op_name):
     if op_name not in get_supported_flagtune_ops():
         return False
-    return _expanded_from_env() or op_name in get_flagtune_include()
+    return (
+        resolve_tuning_mode(op_name, supports_cost_model=False) is TuningMode.EXPANDED
+    )
 
 
 def __getattr__(name):
@@ -243,13 +285,11 @@ register_flagtune_op(
 # DEFAULT_FLAGTUNE_INCLUDE and SUPPORTED_FLAGTUNE_OPS are provided by __getattr__.
 __all__ = [  # noqa: F822
     "DEFAULT_FLAGTUNE_INCLUDE",
-    "FLAGGEMS_FLAGTUNE_EXPANDED_ENV",
-    "FLAGGEMS_FLAGTUNE_INCLUDE_ENV",
     "FLAGTUNE_INCLUDE_ENV",
     "FlagTuneOpSpec",
-    "LEGACY_FLAGTUNE_INCLUDE_ENV",
-    "LEGACY_USE_FLAGTUNE_ENV",
     "SUPPORTED_FLAGTUNE_OPS",
+    "TuningMode",
+    "USE_FLAGTUNE_COST_MODEL_ENV",
     "USE_FLAGTUNE_ENV",
     "flagtune",
     "flagtune_expanded_enabled",
@@ -259,4 +299,5 @@ __all__ = [  # noqa: F822
     "get_flagtune_registry",
     "get_supported_flagtune_ops",
     "register_flagtune_op",
+    "resolve_tuning_mode",
 ]

@@ -59,18 +59,145 @@ def not_raises(ExpectedException):
         raise AssertionError(f"An unexpected exception {error} raised.")
 
 
-def test_legacy_expanded_flagtune_environment_aliases(monkeypatch):
-    """Retain FlagGems expanded-search behavior for both legacy aliases."""
+def test_flagtune_environment_controls_expanded_selection(monkeypatch):
+    """Use the single expanded switch and per-operator include list."""
     monkeypatch.setattr(flagtune_runtime_mod, "_include_ops", None)
-    monkeypatch.delenv("FLAGGEMS_FLAGTUNE_EXPANDED", raising=False)
-    monkeypatch.delenv("FLAGGEMS_FLAGTUNE_INCLUDE", raising=False)
+    monkeypatch.delenv("FLAGTUNE_INCLUDE", raising=False)
+    monkeypatch.setenv("USE_FLAGTUNE", "0")
+
+    assert flagtune_runtime_mod.flagtune_enabled("mm") is False
+
     monkeypatch.setenv("USE_FLAGTUNE", "1")
 
     assert flagtune_runtime_mod.flagtune_enabled("mm") is True
 
     monkeypatch.delenv("USE_FLAGTUNE", raising=False)
     monkeypatch.setenv("FLAGTUNE_INCLUDE", "mm")
-    assert flagtune_runtime_mod.flagtune_enabled("mm") is True
+    assert (
+        flagtune_runtime_mod.resolve_tuning_mode("mm", supports_cost_model=True)
+        is flagtune_runtime_mod.TuningMode.EXPANDED
+    )
+
+
+@pytest.mark.parametrize(
+    ("supports_cost_model", "use_flagtune", "use_cost_model", "expected"),
+    [
+        (False, None, None, "expanded"),
+        (False, "0", None, "default"),
+        (False, "1", None, "expanded"),
+        (False, None, "0", "expanded"),
+        (False, None, "1", "expanded"),
+        (True, None, None, "cost_model"),
+        (True, "0", None, "default"),
+        (True, "0", "0", "default"),
+        (True, "0", "1", "default"),
+        (True, "1", None, "expanded"),
+        (True, "1", "0", "expanded"),
+        (True, None, "0", "expanded"),
+        (True, None, "1", "cost_model"),
+    ],
+)
+def test_tuning_mode_environment_matrix(
+    monkeypatch,
+    supports_cost_model,
+    use_flagtune,
+    use_cost_model,
+    expected,
+):
+    """Keep legacy expanded control while defaulting adapted ops to models."""
+    monkeypatch.setattr(flagtune_runtime_mod, "_include_ops", None)
+    monkeypatch.delenv("FLAGTUNE_INCLUDE", raising=False)
+    if use_flagtune is None:
+        monkeypatch.delenv("USE_FLAGTUNE", raising=False)
+    else:
+        monkeypatch.setenv("USE_FLAGTUNE", use_flagtune)
+    if use_cost_model is None:
+        monkeypatch.delenv("USE_FLAGTUNE_COST_MODEL", raising=False)
+    else:
+        monkeypatch.setenv("USE_FLAGTUNE_COST_MODEL", use_cost_model)
+
+    mode = flagtune_runtime_mod.resolve_tuning_mode(
+        "mm", supports_cost_model=supports_cost_model
+    )
+
+    assert mode.value == expected
+
+
+def test_adapted_tuning_mode_rejects_two_enabled_switches(monkeypatch):
+    """Reject simultaneous requests for expanded and model-backed tuning."""
+    monkeypatch.setenv("USE_FLAGTUNE", "1")
+    monkeypatch.setenv("USE_FLAGTUNE_COST_MODEL", "1")
+
+    with pytest.raises(
+        RuntimeError,
+        match="USE_FLAGTUNE=1 and USE_FLAGTUNE_COST_MODEL=1",
+    ):
+        flagtune_runtime_mod.resolve_tuning_mode("mm", supports_cost_model=True)
+
+
+@pytest.mark.parametrize("name", ["USE_FLAGTUNE", "USE_FLAGTUNE_COST_MODEL"])
+def test_tuning_mode_rejects_non_binary_environment_values(monkeypatch, name):
+    """Fail fast instead of silently treating malformed switches as disabled."""
+    monkeypatch.delenv("USE_FLAGTUNE", raising=False)
+    monkeypatch.delenv("USE_FLAGTUNE_COST_MODEL", raising=False)
+    monkeypatch.setenv(name, "true")
+
+    with pytest.raises(ValueError, match=f"{name} must be 0 or 1"):
+        flagtune_runtime_mod.resolve_tuning_mode("mm", supports_cost_model=True)
+
+
+def test_adapted_libtuner_switches_default_expanded_and_cost_model(monkeypatch):
+    """Apply all three paths through the same environment-mode resolver."""
+    default_configs = [object()]
+    expanded_configs = [object(), object()]
+
+    class FakeTuner:
+        __name__ = "mm"
+        _flagtune_op_name = "mm"
+        _flagtune_expand_op_name = "mm_general_tma"
+        _flagtune_op_id = "flaggems/mm"
+        _flagtune_variant = "general_tma"
+        _flagtune_yaml_path = None
+        _flagtune_pre_hook = None
+        _flagtune_default_configs = default_configs
+        _flagtune_default_strategy = "default_strategy"
+        _flagtune_mode = flagtune_runtime_mod.TuningMode.DEFAULT
+        _flagtune_warned = False
+
+        def _set_configs_and_strategy(self, configs, strategy, *, mode=None):
+            self.configs = configs
+            self.strategy = strategy
+            self._flagtune_mode = flagtune_runtime_mod.TuningMode(mode)
+
+    monkeypatch.setattr(flagtune_runtime_mod, "_include_ops", None)
+    monkeypatch.delenv("FLAGTUNE_INCLUDE", raising=False)
+    monkeypatch.delenv("USE_FLAGTUNE", raising=False)
+    monkeypatch.delenv("USE_FLAGTUNE_COST_MODEL", raising=False)
+    monkeypatch.setattr(
+        libentry_mod.runtime,
+        "get_expand_config",
+        lambda *_args, **_kwargs: {"strategy": "expanded_strategy"},
+    )
+    monkeypatch.setattr(
+        libentry_mod.runtime,
+        "ops_get_configs",
+        lambda *_args, **_kwargs: expanded_configs,
+    )
+    tuner = FakeTuner()
+
+    assert LibTuner.apply_flagtune(tuner) is True
+    assert tuner._flagtune_mode is flagtune_runtime_mod.TuningMode.COST_MODEL
+    assert tuner.configs is default_configs
+
+    monkeypatch.setenv("USE_FLAGTUNE", "1")
+    assert LibTuner.apply_flagtune(tuner) is True
+    assert tuner._flagtune_mode is flagtune_runtime_mod.TuningMode.EXPANDED
+    assert tuner.configs is expanded_configs
+
+    monkeypatch.setenv("USE_FLAGTUNE", "0")
+    assert LibTuner.apply_flagtune(tuner) is True
+    assert tuner._flagtune_mode is flagtune_runtime_mod.TuningMode.DEFAULT
+    assert tuner.configs is default_configs
 
 
 def softmax_inner_decorator_cascade(x, dim, dtype=None):
@@ -410,7 +537,8 @@ def test_flagtree_policy_is_bypassed_when_expanded_flagtune_is_enabled(monkeypat
         called = True
         raise AssertionError("FlagTree proposer should not be used")
 
-    monkeypatch.setenv("FLAGGEMS_FLAGTUNE_EXPANDED", "1")
+    monkeypatch.setenv("USE_FLAGTUNE", "1")
+    monkeypatch.delenv("USE_FLAGTUNE_COST_MODEL", raising=False)
     monkeypatch.setattr(libentry_mod, "_ensure_flagtune_proposer", fail_if_called)
 
     best_config, timings = LibTuner.get("flagtune").policy(
@@ -426,8 +554,8 @@ def test_flagtree_policy_is_bypassed_when_expanded_flagtune_is_enabled(monkeypat
     assert called is False
 
 
-def test_flagtree_policy_is_default_when_use_flagtune_is_disabled(monkeypatch):
-    """Use the model-backed proposer only when its independent switch is on."""
+def test_flagtree_policy_uses_cost_model_by_default_for_adapted_operator(monkeypatch):
+    """Use the model-backed proposer by default for an adapted operator."""
 
     class FakeVariantInfo:
         """Convert one synthetic feature/config schema for proposer testing."""
@@ -470,14 +598,11 @@ def test_flagtree_policy_is_default_when_use_flagtune_is_disabled(monkeypatch):
         proposer_called = True
         return [{"BLOCK": 1}]
 
-    monkeypatch.delenv("FLAGGEMS_FLAGTUNE_EXPANDED", raising=False)
-    monkeypatch.delenv("FLAGGEMS_FLAGTUNE_INCLUDE", raising=False)
     monkeypatch.delenv("USE_FLAGTUNE", raising=False)
+    monkeypatch.delenv("USE_FLAGTUNE_COST_MODEL", raising=False)
     monkeypatch.delenv("FLAGTUNE_INCLUDE", raising=False)
-    monkeypatch.setenv("FLAGTUNE_ENABLE", "1")
     monkeypatch.setattr(flagtune_runtime_mod, "_include_ops", None)
     monkeypatch.setattr(libentry_mod, "_flagtune_available", lambda: (True, None))
-    monkeypatch.setattr(libentry_mod, "_flagtune_enabled", lambda: True)
     observed_identity = {}
 
     def fake_ensure(identity):
@@ -557,7 +682,10 @@ def test_enabled_flagtree_policy_propagates_contract_failures(
             raise RuntimeError(message)
         return [float(config.kwargs["BLOCK"])]
 
-    monkeypatch.setattr(libentry_mod, "_flagtune_enabled", lambda: True)
+    monkeypatch.delenv("USE_FLAGTUNE", raising=False)
+    monkeypatch.delenv("USE_FLAGTUNE_COST_MODEL", raising=False)
+    monkeypatch.delenv("FLAGTUNE_INCLUDE", raising=False)
+    monkeypatch.setattr(flagtune_runtime_mod, "_include_ops", None)
     monkeypatch.setattr(libentry_mod, "_flagtune_available", lambda: (True, None))
     monkeypatch.setattr(libentry_mod, "_ensure_flagtune_proposer", ensure)
     monkeypatch.setattr(
@@ -625,8 +753,8 @@ def test_flagtree_proposer_cache_tracks_resolved_model_version(monkeypatch):
     )
 
 
-def test_flagtree_policy_is_bypassed_when_triton_flagtune_is_disabled(monkeypatch):
-    """Avoid loading pair models unless the new FlagTree switch is enabled."""
+def test_flagtree_policy_is_bypassed_when_cost_model_is_disabled(monkeypatch):
+    """Avoid loading pair models when the Cost Model switch selects Expanded."""
     called = False
 
     class FakeTuner:
@@ -639,14 +767,11 @@ def test_flagtree_policy_is_bypassed_when_triton_flagtune_is_disabled(monkeypatc
         called = True
         raise AssertionError("disabled FlagTree proposer should not be loaded")
 
-    monkeypatch.delenv("FLAGGEMS_FLAGTUNE_EXPANDED", raising=False)
-    monkeypatch.delenv("FLAGGEMS_FLAGTUNE_INCLUDE", raising=False)
     monkeypatch.delenv("USE_FLAGTUNE", raising=False)
+    monkeypatch.setenv("USE_FLAGTUNE_COST_MODEL", "0")
     monkeypatch.delenv("FLAGTUNE_INCLUDE", raising=False)
-    monkeypatch.delenv("FLAGTUNE_ENABLE", raising=False)
     monkeypatch.setattr(flagtune_runtime_mod, "_include_ops", None)
     monkeypatch.setattr(libentry_mod, "_flagtune_available", lambda: (True, None))
-    monkeypatch.setattr(libentry_mod, "_flagtune_enabled", lambda: False)
     monkeypatch.setattr(libentry_mod, "_ensure_flagtune_proposer", fail_if_called)
 
     best_config, timings = LibTuner.get("flagtune").policy(
@@ -1055,6 +1180,32 @@ def test_config_cache_namespace_separates_replay_protocols():
     assert replay_ten.startswith("mm_kernel_benchmark_")
     assert replay_five.startswith("mm_kernel_benchmark_")
     assert replay_ten != replay_five
+
+
+def test_adapted_config_cache_namespace_separates_tuning_modes():
+    """Prevent Default and Cost Model paths from sharing best-config rows."""
+
+    class FakeTuner:
+        __name__ = "mm"
+        kernel_hash = "kernel"
+        _benchmark_protocol = ("triton_do_bench", 25, 100)
+        _flagtune_op_id = "flaggems/mm"
+        _flagtune_variant = "general_tma"
+
+    tuner = FakeTuner()
+    names = {}
+    for mode in flagtune_runtime_mod.TuningMode:
+        tuner._flagtune_mode = mode
+        names[mode] = LibTuner._make_config_table_name(tuner)
+
+    assert len(set(names.values())) == 3
+    assert names[flagtune_runtime_mod.TuningMode.DEFAULT].endswith("_flagtune_default")
+    assert names[flagtune_runtime_mod.TuningMode.EXPANDED].endswith(
+        "_flagtune_expanded"
+    )
+    assert names[flagtune_runtime_mod.TuningMode.COST_MODEL].endswith(
+        "_flagtune_cost_model"
+    )
 
 
 def test_benchmark_config_reuses_kernel_context_and_bypasses_caches(monkeypatch):

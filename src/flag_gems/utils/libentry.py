@@ -370,11 +370,10 @@ class LibTuner(triton.runtime.Autotuner):
                 tensor dtypes in model identity order. YAML cannot set it.
 
         Notes:
-            ``FLAGGEMS_FLAGTUNE_EXPANDED`` switches to the legacy expanded
-            config space and intentionally bypasses the FlagTree proposer
-            policy. ``USE_FLAGTUNE`` remains its compatibility alias.
-            FlagTree's own enablement is ``FLAGTUNE_ENABLE``. The two
-            mechanisms are independent and must not be treated as aliases.
+            ``USE_FLAGTUNE`` explicitly selects the default or expanded config
+            space and intentionally bypasses the FlagTree proposer policy.
+            Adapted operators use Cost Model tuning by default, and
+            ``USE_FLAGTUNE_COST_MODEL`` can explicitly select or disable it.
         """
         selected_benchmark_mode = _select_benchmark_mode(benchmark_mode, use_cuda_graph)
         benchmark_retries = _validate_benchmark_retries(benchmark_retries)
@@ -470,15 +469,8 @@ class LibTuner(triton.runtime.Autotuner):
         self.__name__ = self.base_fn.__name__
         self.keys = key
         self.strategy: List[Callable[[Any], Any]] = self._normalize_strategy(strategy)
-        self.config_table_name: str = self._make_config_table_name()
-        self.benchmark_table_name: str = (
-            f"{self.__name__}_{self.cache_key}_benchmark_v"
-            f"{BENCHMARK_CACHE_SCHEMA_VERSION}"
-        )
-        self.cache: ConfigCache = libcache[self.config_table_name]
         self._flagtune_default_configs = self.configs
         self._flagtune_default_strategy = strategy
-        self._flagtune_active = False
         self._flagtune_warned = False
         self._flagtune_op_name = flagtune_op_name
         self._flagtune_expand_op_name = flagtune_expand_op_name or flagtune_op_name
@@ -488,6 +480,7 @@ class LibTuner(triton.runtime.Autotuner):
             )
         self._flagtune_op_id = flagtune_op_id
         self._flagtune_variant = flagtune_variant
+        self._flagtune_mode = runtime.TuningMode.DEFAULT
         self._flagtune_yaml_path = flagtune_yaml_path
         self._flagtune_pre_hook = flagtune_pre_hook
         if flagtune_dtype_resolver is not None and not callable(
@@ -496,10 +489,22 @@ class LibTuner(triton.runtime.Autotuner):
             raise TypeError("flagtune_dtype_resolver must be a trusted callable")
         self._flagtune_dtype_resolver = flagtune_dtype_resolver
         self._run_mode = LibTunerRunMode.NORMAL
+        self.config_table_name: str = self._make_config_table_name()
+        self.benchmark_table_name: str = (
+            f"{self.__name__}_{self.cache_key}_benchmark_v"
+            f"{BENCHMARK_CACHE_SCHEMA_VERSION}"
+        )
+        self.cache: ConfigCache = libcache[self.config_table_name]
 
     def _make_config_table_name(self) -> str:
-        """Namespace best-config rows by timing protocol without losing event data."""
+        """Namespace best configs by selection mode and timing protocol."""
         base = f"{self.__name__}_{self.kernel_hash}"
+        if (
+            getattr(self, "_flagtune_op_id", None) is not None
+            and getattr(self, "_flagtune_variant", None) is not None
+        ):
+            mode = getattr(self, "_flagtune_mode", runtime.TuningMode.DEFAULT)
+            base = f"{base}_flagtune_{runtime.TuningMode(mode).value}"
         if self._benchmark_protocol[0] == "triton_do_bench":
             return base
         protocol_hash = hashlib.sha256(
@@ -517,9 +522,11 @@ class LibTuner(triton.runtime.Autotuner):
         ), f"the length of strategy {len(strategy)} must match the length of keys {len(self.keys)}"
         return [LibTuner.get_strategy(s) if isinstance(s, str) else s for s in strategy]
 
-    def _set_configs_and_strategy(self, configs, strategy):
+    def _set_configs_and_strategy(self, configs, strategy, *, mode=None):
         self.configs = configs
         self.strategy = self._normalize_strategy(strategy)
+        if mode is not None:
+            self._flagtune_mode = runtime.TuningMode(mode)
         self.__dict__.pop("configs_hash", None)
         self.__dict__.pop("kernel_hash", None)
         self.config_table_name = self._make_config_table_name()
@@ -530,41 +537,62 @@ class LibTuner(triton.runtime.Autotuner):
         self.cache = libcache[self.config_table_name]
 
     def apply_flagtune(self):
-        if self._flagtune_op_name is None:
+        supports_cost_model = (
+            self._flagtune_op_id is not None and self._flagtune_variant is not None
+        )
+        if self._flagtune_op_name is None and not supports_cost_model:
             return False
 
-        enabled = runtime.flagtune_enabled(self._flagtune_op_name)
-        if enabled == self._flagtune_active:
+        op_name = (
+            self._flagtune_op_name or self._flagtune_expand_op_name or self.__name__
+        )
+        mode = runtime.resolve_tuning_mode(
+            op_name,
+            supports_cost_model=supports_cost_model,
+        )
+        if mode is self._flagtune_mode:
             return False
 
-        if not enabled:
+        if mode is not runtime.TuningMode.EXPANDED:
             self._set_configs_and_strategy(
                 self._flagtune_default_configs,
                 self._flagtune_default_strategy,
+                mode=mode,
             )
-            self._flagtune_active = False
             return True
 
-        expand_config = runtime.get_expand_config(
-            self._flagtune_expand_op_name,
-            yaml_path=self._flagtune_yaml_path,
-        )
-        configs = runtime.ops_get_configs(
-            self._flagtune_expand_op_name,
-            yaml_path=self._flagtune_yaml_path,
-            pre_hook=self._flagtune_pre_hook,
-        )
+        if self._flagtune_expand_op_name is None:
+            expand_config = -1
+            configs = []
+        else:
+            expand_config = runtime.get_expand_config(
+                self._flagtune_expand_op_name,
+                yaml_path=self._flagtune_yaml_path,
+            )
+            configs = runtime.ops_get_configs(
+                self._flagtune_expand_op_name,
+                yaml_path=self._flagtune_yaml_path,
+                pre_hook=self._flagtune_pre_hook,
+            )
         if expand_config == -1 or not configs:
             if not self._flagtune_warned:
                 logger.warning(
                     "FlagTune expand config is unavailable for %s; using default configs.",
-                    self._flagtune_expand_op_name,
+                    self._flagtune_expand_op_name or op_name,
                 )
                 self._flagtune_warned = True
-            return False
+            self._set_configs_and_strategy(
+                self._flagtune_default_configs,
+                self._flagtune_default_strategy,
+                mode=mode,
+            )
+            return True
 
-        self._set_configs_and_strategy(configs, expand_config["strategy"])
-        self._flagtune_active = True
+        self._set_configs_and_strategy(
+            configs,
+            expand_config["strategy"],
+            mode=mode,
+        )
         return True
 
     @cached_property
@@ -1037,15 +1065,6 @@ def _flagtune_available() -> Tuple[bool, Optional[BaseException]]:
     return _FLAGTUNE_AVAILABILITY
 
 
-def _flagtune_enabled() -> bool:
-    """Return FlagTree's cached enablement independently of legacy FlagGems."""
-    try:
-        from triton.flagtune import is_enabled
-    except (ImportError, AttributeError):
-        return os.environ.get("FLAGTUNE_ENABLE", "").strip() == "1"
-    return is_enabled()
-
-
 def _ensure_flagtune_proposer(identity):
     """Return the proposer and bundled metadata for one resolved model version.
 
@@ -1187,20 +1206,28 @@ def flagtune_policy(
         pre-hook when needed, and are benchmarked to choose the minimum latency.
 
     Notes:
-        FlagGems' legacy ``FLAGGEMS_FLAGTUNE_EXPANDED`` path selects expanded
-        configs and deliberately uses the default exhaustive LibTuner policy;
-        ``USE_FLAGTUNE`` remains a compatibility alias. It is not the
-        ``FLAGTUNE_ENABLE`` proposer switch. Enabled integration and candidate
-        benchmark failures propagate. The proposer may invoke
-        ``bench_fn`` before the final selection loop, but LibTuner's benchmark
-        cache normally prevents duplicate device measurements.
+        ``USE_FLAGTUNE`` preserves its legacy Default/Expanded selection.
+        Adapted operators default to Cost Model tuning, while
+        ``USE_FLAGTUNE_COST_MODEL`` can explicitly select or disable it.
+        Enabled integration and candidate benchmark failures propagate. The
+        proposer may invoke ``bench_fn`` before the final selection loop, but
+        LibTuner's benchmark cache normally prevents duplicate device
+        measurements.
     """
     configs = list(configs)
-    if self._flagtune_op_name is not None and runtime.flagtune_enabled(
-        self._flagtune_op_name
-    ):
-        return LibTuner.get("default").policy(self, bench_fn, configs, args, kwargs)
-    if not _flagtune_enabled():
+    op_id = getattr(self, "_flagtune_op_id", None)
+    variant = getattr(self, "_flagtune_variant", None)
+    supports_cost_model = op_id is not None and variant is not None
+    op_name = (
+        getattr(self, "_flagtune_op_name", None)
+        or getattr(self, "_flagtune_expand_op_name", None)
+        or getattr(self, "__name__", "unknown")
+    )
+    mode = runtime.resolve_tuning_mode(
+        op_name,
+        supports_cost_model=supports_cost_model,
+    )
+    if mode is not runtime.TuningMode.COST_MODEL:
         return LibTuner.get("default").policy(self, bench_fn, configs, args, kwargs)
     available, exc = _flagtune_available()
     if not available:
@@ -1208,12 +1235,6 @@ def flagtune_policy(
             "FlagTune is enabled but the FlagTree runtime is unavailable"
         ) from exc
 
-    op_id = self._flagtune_op_id
-    variant = self._flagtune_variant
-    if op_id is None or variant is None:
-        raise RuntimeError(
-            "FlagTune is enabled but flagtune_op_id/flagtune_variant are not configured"
-        )
     from triton.flagtune.contract.identity import (
         ModelIdentity,
         discover_gpu_metadata,
@@ -1495,9 +1516,12 @@ class LibEntry(triton.KernelInterface):
     @staticmethod
     def _contains_flagtune_tuner(fn):
         while not isinstance(fn, triton.runtime.JITFunction):
-            if (
-                getattr(fn, "apply_flagtune", None) is not None
-                and getattr(fn, "_flagtune_op_name", None) is not None
+            if getattr(fn, "apply_flagtune", None) is not None and (
+                getattr(fn, "_flagtune_op_name", None) is not None
+                or (
+                    getattr(fn, "_flagtune_op_id", None) is not None
+                    and getattr(fn, "_flagtune_variant", None) is not None
+                )
             ):
                 return True
             fn = getattr(fn, "fn", None)

@@ -22,10 +22,8 @@ Environment variables:
   * Backend visibility variables such as ``CUDA_VISIBLE_DEVICES``,
     ``ROCR_VISIBLE_DEVICES``, and ``HIP_VISIBLE_DEVICES`` limit visible device
     tokens and are captured in the run manifest.
-  * ``FLAGGEMS_FLAGTUNE_EXPANDED`` and ``FLAGGEMS_FLAGTUNE_INCLUDE`` are
-    FlagGems-local legacy-expanded policy inputs. ``USE_FLAGTUNE`` and
-    ``FLAGTUNE_INCLUDE`` remain their compatibility aliases.
-  * ``FLAGTUNE_ENABLE``, ``FLAGTUNE_DISABLE_OPS``,
+  * ``USE_FLAGTUNE`` and ``FLAGTUNE_INCLUDE`` select FlagGems' expanded policy.
+  * ``USE_FLAGTUNE_COST_MODEL``, ``FLAGTUNE_DISABLE_OPS``,
     ``FLAGTUNE_TOP_K``, ``FLAGTUNE_MODEL_DIR``,
     ``FLAGTUNE_MODEL_CACHE``, ``FLAGTUNE_LOCAL_MANIFEST``,
     ``FLAGTUNE_MODEL_VERSION``, ``FLAGTUNE_MODEL_DOWNLOAD_LATEST``, and
@@ -97,11 +95,9 @@ from flag_gems.flagtune.reporting.schema import SCHEMA_VERSION  # noqa: E402
 
 DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "flagtune-pretune-output"
 STRATEGY_ENV_NAMES = (
-    "FLAGGEMS_FLAGTUNE_EXPANDED",
-    "FLAGGEMS_FLAGTUNE_INCLUDE",
     "USE_FLAGTUNE",
     "FLAGTUNE_INCLUDE",
-    "FLAGTUNE_ENABLE",
+    "USE_FLAGTUNE_COST_MODEL",
     "FLAGTUNE_DISABLE_OPS",
     "FLAGTUNE_TOP_K",
     "FLAGTUNE_MODEL_DIR",

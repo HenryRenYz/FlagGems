@@ -18,7 +18,7 @@ Environment variables:
   * ``FLAGTREE_AABS`` is saved, forced to ``"0"`` during worker collection, and
     restored afterwards. This preserves raw configured combinations so their
     feature rows remain aligned; callers cannot override that behavior here.
-  * ``FLAGGEMS_FLAGTUNE_PROGRESS_INTERVAL`` is similarly saved, set from the
+  * ``FLAGTUNE_TRAIN_PROGRESS_INTERVAL`` is similarly saved, set from the
     progress option for worker status reporting, then restored. A non-negative
     value is expected by the executor.
 
@@ -681,13 +681,13 @@ def run_main(args: argparse.Namespace) -> int:
     _status(f"Collection database: {sanitize_db_url(database_url)}")
     progress = _progress(len(selected), not args.no_progress)
     previous_aabs = os.environ.get("FLAGTREE_AABS")
-    previous_progress_interval = os.environ.get("FLAGGEMS_FLAGTUNE_PROGRESS_INTERVAL")
+    previous_progress_interval = os.environ.get("FLAGTUNE_TRAIN_PROGRESS_INTERVAL")
     # Training features describe the exact configured parameter combination.
     # AABS mutates block sizes per shape and can collapse several raw configs
     # into one timing-map key, so exhaustive offline collection disables it in
     # worker subprocesses.  Normal Pretune and runtime behavior are untouched.
     os.environ["FLAGTREE_AABS"] = "0"
-    os.environ["FLAGGEMS_FLAGTUNE_PROGRESS_INTERVAL"] = str(
+    os.environ["FLAGTUNE_TRAIN_PROGRESS_INTERVAL"] = str(
         0 if args.no_progress else args.progress_interval
     )
     try:
@@ -805,11 +805,9 @@ def run_main(args: argparse.Namespace) -> int:
         else:
             os.environ["FLAGTREE_AABS"] = previous_aabs
         if previous_progress_interval is None:
-            os.environ.pop("FLAGGEMS_FLAGTUNE_PROGRESS_INTERVAL", None)
+            os.environ.pop("FLAGTUNE_TRAIN_PROGRESS_INTERVAL", None)
         else:
-            os.environ["FLAGGEMS_FLAGTUNE_PROGRESS_INTERVAL"] = (
-                previous_progress_interval
-            )
+            os.environ["FLAGTUNE_TRAIN_PROGRESS_INTERVAL"] = previous_progress_interval
 
     if failed_shapes:
         raise TrainError(

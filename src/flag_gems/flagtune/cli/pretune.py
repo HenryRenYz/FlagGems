@@ -23,7 +23,7 @@ Environment variables:
     ``ROCR_VISIBLE_DEVICES``, and ``HIP_VISIBLE_DEVICES`` limit visible device
     tokens and are captured in the run manifest.
   * ``USE_FLAGTUNE`` selects FlagGems' Default or FlagTune routing, while
-    ``FLAGTUNE_INCLUDE`` selects individual operators for expanded tuning.
+    ``FLAGTUNE_INCLUDE`` selects individual operators for capability-based tuning.
   * ``USE_FLAGTUNE_COST_MODEL``, ``FLAGTUNE_DISABLE_OPS``,
     ``FLAGTUNE_TOP_K``, ``FLAGTUNE_MODEL_DIR``,
     ``FLAGTUNE_MODEL_CACHE``, ``FLAGTUNE_LOCAL_MANIFEST``,

@@ -63,8 +63,8 @@ def not_raises(ExpectedException):
         raise AssertionError(f"An unexpected exception {error} raised.")
 
 
-def test_flagtune_environment_controls_expanded_selection(monkeypatch):
-    """Use the single expanded switch and per-operator include list."""
+def test_flagtune_environment_controls_operator_selection(monkeypatch):
+    """Apply global and per-operator selection using each operator's capability."""
     monkeypatch.setattr(flagtune_runtime_mod, "_include_ops", None)
     monkeypatch.delenv("FLAGTUNE_INCLUDE", raising=False)
     monkeypatch.setenv("USE_FLAGTUNE", "0")
@@ -76,7 +76,17 @@ def test_flagtune_environment_controls_expanded_selection(monkeypatch):
     assert flagtune_runtime_mod.flagtune_enabled("mm") is True
 
     monkeypatch.delenv("USE_FLAGTUNE", raising=False)
-    monkeypatch.setenv("FLAGTUNE_INCLUDE", "mm")
+    flag_gems.flagtune(include=["mm"])
+    assert (
+        flagtune_runtime_mod.resolve_tuning_mode("mm", supports_cost_model=False)
+        is flagtune_runtime_mod.TuningMode.EXPANDED
+    )
+    assert (
+        flagtune_runtime_mod.resolve_tuning_mode("mm", supports_cost_model=True)
+        is flagtune_runtime_mod.TuningMode.COST_MODEL
+    )
+
+    monkeypatch.setenv("USE_FLAGTUNE_COST_MODEL", "0")
     assert (
         flagtune_runtime_mod.resolve_tuning_mode("mm", supports_cost_model=True)
         is flagtune_runtime_mod.TuningMode.EXPANDED

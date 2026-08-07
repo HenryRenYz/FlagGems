@@ -153,10 +153,10 @@ def flagtune(include=None):
     """Enable runtime FlagTune for selected operators.
 
     Passing include=None enables the registry's default operators. Passing a
-    string or iterable selects the registered operators that should use
-    expanded tuning spaces when their LibTuner runs. This API only updates the
-    explicit include list; setting ``USE_FLAGTUNE=1`` enables every registered
-    FlagTune operator.
+    string or iterable selects registered operators for capability-appropriate
+    tuning: Expanded for an unadapted operator and Cost Model for an adapted
+    operator. This API only updates the explicit include list; setting
+    ``USE_FLAGTUNE=1`` enables every registered FlagTune operator.
     """
     global _include_ops
     _include_ops = _normalize_include(include)
@@ -186,9 +186,9 @@ def resolve_tuning_mode(op_name, *, supports_cost_model=False):
     ``USE_FLAGTUNE=0`` selects the default config space. ``USE_FLAGTUNE=1``
     enables Expanded tuning for an unadapted operator and Cost Model tuning for
     an adapted operator. With neither switch set, unadapted operators default to
-    Default and adapted operators default to Cost Model. An adapted operator
-    uses Expanded only when ``USE_FLAGTUNE_COST_MODEL=0`` or when selected by
-    ``FLAGTUNE_INCLUDE`` without an explicit global/model enablement.
+    Default and adapted operators default to Cost Model. ``FLAGTUNE_INCLUDE``
+    applies the same capability-based selection to individual operators. An
+    adapted operator uses Expanded only when ``USE_FLAGTUNE_COST_MODEL=0``.
     """
     try:
         name = _normalize_op_name(op_name)
@@ -207,8 +207,6 @@ def resolve_tuning_mode(op_name, *, supports_cost_model=False):
             return TuningMode.EXPANDED
         if cost_model_setting is True or use_flagtune_setting is True:
             return TuningMode.COST_MODEL
-        if name in get_flagtune_include():
-            return TuningMode.EXPANDED
         return TuningMode.COST_MODEL
     if use_flagtune_setting is True or name in get_flagtune_include():
         return TuningMode.EXPANDED

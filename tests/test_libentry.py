@@ -1432,6 +1432,8 @@ def test_hopper_mm_config_compiles_without_runtime_registration():
     reason="Issue #2827: It's not stable in full test though it's passed by single test",
 )
 def test_libcache_vllm_signal_scenario():
+    cache_ready = multiprocessing.Event()
+
     def child_process():
         cache = libcache["test_vllm_operator"]
         cache[(128, 256, "torch.float32")] = triton.Config(
@@ -1440,6 +1442,7 @@ def test_libcache_vllm_signal_scenario():
         cache[(256, 512, "torch.float32")] = triton.Config(
             {"TILE_SIZE": 128}, num_warps=8
         )
+        cache_ready.set()
         while True:
             time.sleep(0.1)
 
@@ -1448,30 +1451,34 @@ def test_libcache_vllm_signal_scenario():
     # Start child process
     process = multiprocessing.Process(target=child_process)
     process.start()
-    time.sleep(1)
-    os.kill(process.pid, signal.SIGINT)
-    process.join(timeout=5)
+    try:
+        assert cache_ready.wait(timeout=10), (
+            "child process did not persist LibCache entries before timeout: "
+            f"exitcode={process.exitcode}"
+        )
+        os.kill(process.pid, signal.SIGINT)
+        process.join(timeout=5)
 
-    cache_saved = False
-    if cache_path.exists():
-        cache = libcache["test_vllm_operator"]
-        if (128, 256, "torch.float32") in cache and (
-            256,
-            512,
-            "torch.float32",
-        ) in cache:
-            cache_saved = True
+        cache_saved = False
+        if cache_path.exists():
+            cache = libcache["test_vllm_operator"]
+            if (128, 256, "torch.float32") in cache and (
+                256,
+                512,
+                "torch.float32",
+            ) in cache:
+                cache_saved = True
 
-    if flag_gems.vendor_name != "cambricon":
-        # TODO: (cambricon) Sqlite DO NOT approve that data can be written into
-        # db file correctly, expecially in multiprocessing circumstances.
-        assert (
-            cache_saved
-        ), f"Test documented current behavior: cache_saved={cache_saved}"
-
-    if process.is_alive():
-        os.kill(process.pid, signal.SIGKILL)
-        process.join()
+        if flag_gems.vendor_name != "cambricon":
+            # TODO: (cambricon) Sqlite DO NOT approve that data can be written into
+            # db file correctly, expecially in multiprocessing circumstances.
+            assert (
+                cache_saved
+            ), f"Test documented current behavior: cache_saved={cache_saved}"
+    finally:
+        if process.is_alive():
+            os.kill(process.pid, signal.SIGKILL)
+            process.join()
 
 
 @pytest.mark.skipif(

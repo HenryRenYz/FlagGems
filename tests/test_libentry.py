@@ -82,19 +82,24 @@ def test_flagtune_environment_controls_expanded_selection(monkeypatch):
 @pytest.mark.parametrize(
     ("supports_cost_model", "use_flagtune", "use_cost_model", "expected"),
     [
-        (False, None, None, "expanded"),
+        (False, None, None, "default"),
+        (False, None, "0", "default"),
+        (False, None, "1", "default"),
         (False, "0", None, "default"),
+        (False, "0", "0", "default"),
+        (False, "0", "1", "default"),
         (False, "1", None, "expanded"),
-        (False, None, "0", "expanded"),
-        (False, None, "1", "expanded"),
+        (False, "1", "0", "expanded"),
+        (False, "1", "1", "expanded"),
         (True, None, None, "cost_model"),
+        (True, None, "0", "expanded"),
+        (True, None, "1", "cost_model"),
         (True, "0", None, "default"),
         (True, "0", "0", "default"),
         (True, "0", "1", "default"),
-        (True, "1", None, "expanded"),
+        (True, "1", None, "cost_model"),
         (True, "1", "0", "expanded"),
-        (True, None, "0", "expanded"),
-        (True, None, "1", "cost_model"),
+        (True, "1", "1", "cost_model"),
     ],
 )
 def test_tuning_mode_environment_matrix(
@@ -104,7 +109,7 @@ def test_tuning_mode_environment_matrix(
     use_cost_model,
     expected,
 ):
-    """Keep legacy expanded control while defaulting adapted ops to models."""
+    """Cover every switch combination for adapted and unadapted operators."""
     monkeypatch.setattr(flagtune_runtime_mod, "_include_ops", None)
     monkeypatch.delenv("FLAGTUNE_INCLUDE", raising=False)
     if use_flagtune is None:
@@ -123,16 +128,15 @@ def test_tuning_mode_environment_matrix(
     assert mode.value == expected
 
 
-def test_adapted_tuning_mode_rejects_two_enabled_switches(monkeypatch):
-    """Reject simultaneous requests for expanded and model-backed tuning."""
+def test_adapted_tuning_mode_prefers_cost_model_when_both_enabled(monkeypatch):
+    """Treat both enabled switches as an explicit Cost Model request."""
     monkeypatch.setenv("USE_FLAGTUNE", "1")
     monkeypatch.setenv("USE_FLAGTUNE_COST_MODEL", "1")
 
-    with pytest.raises(
-        RuntimeError,
-        match="USE_FLAGTUNE=1 and USE_FLAGTUNE_COST_MODEL=1",
-    ):
+    assert (
         flagtune_runtime_mod.resolve_tuning_mode("mm", supports_cost_model=True)
+        is flagtune_runtime_mod.TuningMode.COST_MODEL
+    )
 
 
 @pytest.mark.parametrize("name", ["USE_FLAGTUNE", "USE_FLAGTUNE_COST_MODEL"])
@@ -190,6 +194,11 @@ def test_adapted_libtuner_switches_default_expanded_and_cost_model(monkeypatch):
     assert tuner.configs is default_configs
 
     monkeypatch.setenv("USE_FLAGTUNE", "1")
+    assert LibTuner.apply_flagtune(tuner) is False
+    assert tuner._flagtune_mode is flagtune_runtime_mod.TuningMode.COST_MODEL
+    assert tuner.configs is default_configs
+
+    monkeypatch.setenv("USE_FLAGTUNE_COST_MODEL", "0")
     assert LibTuner.apply_flagtune(tuner) is True
     assert tuner._flagtune_mode is flagtune_runtime_mod.TuningMode.EXPANDED
     assert tuner.configs is expanded_configs
@@ -538,7 +547,7 @@ def test_flagtree_policy_is_bypassed_when_expanded_flagtune_is_enabled(monkeypat
         raise AssertionError("FlagTree proposer should not be used")
 
     monkeypatch.setenv("USE_FLAGTUNE", "1")
-    monkeypatch.delenv("USE_FLAGTUNE_COST_MODEL", raising=False)
+    monkeypatch.setenv("USE_FLAGTUNE_COST_MODEL", "0")
     monkeypatch.setattr(libentry_mod, "_ensure_flagtune_proposer", fail_if_called)
 
     best_config, timings = LibTuner.get("flagtune").policy(

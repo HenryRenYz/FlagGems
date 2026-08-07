@@ -370,10 +370,10 @@ class LibTuner(triton.runtime.Autotuner):
                 tensor dtypes in model identity order. YAML cannot set it.
 
         Notes:
-            ``USE_FLAGTUNE`` explicitly selects the default or expanded config
-            space and intentionally bypasses the FlagTree proposer policy.
-            Adapted operators use Cost Model tuning by default, and
-            ``USE_FLAGTUNE_COST_MODEL`` can explicitly select or disable it.
+            ``USE_FLAGTUNE=0`` selects Default. ``USE_FLAGTUNE=1`` selects
+            Expanded for unadapted operators and Cost Model for adapted ones.
+            Adapted operators use Cost Model by default, while
+            ``USE_FLAGTUNE_COST_MODEL=0`` explicitly selects Expanded.
         """
         selected_benchmark_mode = _select_benchmark_mode(benchmark_mode, use_cuda_graph)
         benchmark_retries = _validate_benchmark_retries(benchmark_retries)
@@ -1206,9 +1206,9 @@ def flagtune_policy(
         pre-hook when needed, and are benchmarked to choose the minimum latency.
 
     Notes:
-        ``USE_FLAGTUNE`` preserves its legacy Default/Expanded selection.
-        Adapted operators default to Cost Model tuning, while
-        ``USE_FLAGTUNE_COST_MODEL`` can explicitly select or disable it.
+        ``USE_FLAGTUNE=0`` selects Default. Adapted operators use Cost Model
+        when FlagTune is enabled or neither switch is set, while
+        ``USE_FLAGTUNE_COST_MODEL=0`` explicitly selects Expanded.
         Enabled integration and candidate benchmark failures propagate. The
         proposer may invoke ``bench_fn`` before the final selection loop, but
         LibTuner's benchmark cache normally prevents duplicate device

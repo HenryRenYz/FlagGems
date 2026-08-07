@@ -129,14 +129,14 @@ def _optional_binary_environment(name):
     return value == "1"
 
 
-def _expanded_setting_from_env():
-    """Return the explicit expanded-space selection."""
+def _use_flagtune_setting_from_env():
+    """Return whether FlagTune is explicitly disabled or enabled."""
     return _optional_binary_environment(USE_FLAGTUNE_ENV)
 
 
 def _expanded_from_env():
-    """Return whether expanded search is explicitly enabled."""
-    return _expanded_setting_from_env() is True
+    """Return whether the legacy switch explicitly enables FlagTune."""
+    return _use_flagtune_setting_from_env() is True
 
 
 def flagtune_expanded_enabled():
@@ -183,39 +183,36 @@ def get_flagtune_include():
 def resolve_tuning_mode(op_name, *, supports_cost_model=False):
     """Resolve Default, Expanded, or Cost Model tuning for one operator.
 
-    ``USE_FLAGTUNE`` retains its historical meaning whenever it is explicitly
-    set: ``0`` selects the default config space and ``1`` selects the expanded
-    config space. With no explicit legacy selection, an unadapted operator
-    defaults to Expanded and an adapted operator defaults to Cost Model tuning.
-    ``USE_FLAGTUNE_COST_MODEL=0`` lets an adapted operator opt out to expanded
-    tuning, while enabling both paths is rejected.
+    ``USE_FLAGTUNE=0`` selects the default config space. ``USE_FLAGTUNE=1``
+    enables Expanded tuning for an unadapted operator and Cost Model tuning for
+    an adapted operator. With neither switch set, unadapted operators default to
+    Default and adapted operators default to Cost Model. An adapted operator
+    uses Expanded only when ``USE_FLAGTUNE_COST_MODEL=0`` or when selected by
+    ``FLAGTUNE_INCLUDE`` without an explicit global/model enablement.
     """
     try:
         name = _normalize_op_name(op_name)
     except (TypeError, ValueError):
         return TuningMode.DEFAULT
 
-    expanded_setting = _expanded_setting_from_env()
+    use_flagtune_setting = _use_flagtune_setting_from_env()
     cost_model_setting = None
     if supports_cost_model:
         cost_model_setting = _optional_binary_environment(USE_FLAGTUNE_COST_MODEL_ENV)
-        if expanded_setting is True and cost_model_setting is True:
-            raise RuntimeError(
-                "USE_FLAGTUNE=1 and USE_FLAGTUNE_COST_MODEL=1 cannot be "
-                "enabled together for a Cost Model adapted operator"
-            )
 
-    if expanded_setting is False:
+    if use_flagtune_setting is False:
         return TuningMode.DEFAULT
-    if expanded_setting is True:
-        return TuningMode.EXPANDED
-    if name in get_flagtune_include():
-        return TuningMode.EXPANDED
     if supports_cost_model:
         if cost_model_setting is False:
             return TuningMode.EXPANDED
+        if cost_model_setting is True or use_flagtune_setting is True:
+            return TuningMode.COST_MODEL
+        if name in get_flagtune_include():
+            return TuningMode.EXPANDED
         return TuningMode.COST_MODEL
-    return TuningMode.EXPANDED
+    if use_flagtune_setting is True or name in get_flagtune_include():
+        return TuningMode.EXPANDED
+    return TuningMode.DEFAULT
 
 
 def flagtune_enabled(op_name):

@@ -91,8 +91,10 @@ def load_shape_config(path: Path, operator_name: str) -> ShapeConfig:
             malformed, or a row length differs from the shape specification.
 
     Notes:
-        Dimension names, types, positivity, ``Count``, and variant constraints
-        are intentionally left to the compiled operator YAML schema.
+        Dimension names, types, required/optional fields, ``Count``, and variant
+        constraints are intentionally left to the compiled operator YAML schema.
+        Rows may omit trailing optional fields; schemas with a final Count field
+        also support omitting optional fields immediately before Count.
     """
 
     try:
@@ -131,10 +133,10 @@ def load_shape_config(path: Path, operator_name: str) -> ShapeConfig:
     for index, row in enumerate(raw_shapes):
         if not isinstance(row, (list, tuple)):
             raise PretuneIOError(f"{operator_name}.shapes[{index}] must be a list")
-        if len(row) != len(shape_spec):
+        if len(row) > len(shape_spec):
             raise PretuneIOError(
                 f"{operator_name}.shapes[{index}] has {len(row)} values but "
-                f"the shape specification has {len(shape_spec)} fields"
+                f"the shape specification has only {len(shape_spec)} fields"
             )
         rows.append(tuple(row))
     if not rows:

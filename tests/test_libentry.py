@@ -1508,6 +1508,46 @@ def test_hopper_mm_config_compiles_without_runtime_registration():
 
 
 @pytest.mark.skipif(
+    flag_gems.vendor_name != "nvidia" or not HAS_FLAGTREE_FLAGTUNE,
+    reason="The Cost Model binding requires NVIDIA and the optional FlagTree package.",
+)
+def test_mul_config_compiles_and_binds_runtime_kernels():
+    """Bind data-driven mul variants to the scalar and 2D broadcast tuners."""
+    from flag_gems.flagtune.contracts import operator as operator_config_mod
+
+    spec = operator_config_mod.load_operator_benchmark_spec(
+        os.path.join(
+            os.path.dirname(operator_config_mod.__file__),
+            "configs",
+            "mul_flagtune_configs.yaml",
+        )
+    )
+    operator = spec.operator_info
+    expected = {
+        "broadcast_2d": ({"n_elements": 4096, "n_cols": 2048}, 280, 12),
+        "scalar": ({"n_elements": 18}, 280, 9),
+    }
+    assert set(operator.variants) == set(expected)
+
+    public_operator = operator_config_mod.resolve_public_operator(
+        flag_gems, operator.op_id
+    )
+    expected_kernels = {
+        "broadcast_2d": "mul_broadcast_2d_kernel",
+        "scalar": "mul_scalar_kernel",
+    }
+    for variant_name, (shape, config_count, feature_count) in expected.items():
+        variant = operator.get_variant(variant_name)
+        assert variant.matches(shape)
+        assert sum(1 for _ in variant.iter_configs()) == config_count
+        assert len(variant.feature_names) == feature_count
+        _, tuner = libentry_mod.find_flagtune_benchmark_target(
+            public_operator, operator.op_id, variant_name
+        )
+        assert tuner.fn.__name__ == expected_kernels[variant_name]
+
+
+@pytest.mark.skipif(
     flag_gems.vendor_name == "mthreads",
     reason="Issue #2826: Cannot re-initialize MUSA in forked subprocess",
 )

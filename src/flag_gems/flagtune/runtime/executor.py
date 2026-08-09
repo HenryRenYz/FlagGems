@@ -478,13 +478,14 @@ class BenchmarkWorker:
         return configs
 
     def _make_tensors(
-        self, values: Mapping[str, Any], dtypes: Sequence[Any]
+        self, values: Mapping[str, Any], dtypes: Sequence[Any], variant: str
     ) -> dict[str, Any]:
-        """Construct benchmark tensors from compiled allowlisted recipes.
+        """Construct the tensors used by one variant's benchmark invocation.
 
         Args:
             values: Canonical ordered shape identity mapping.
-            dtype: Runtime torch dtype selected by the CLI/benchmark API.
+            dtypes: Runtime torch dtypes assigned in tensor-recipe order.
+            variant: Resolved variant selecting the public invocation arguments.
 
         Returns:
             Mapping from YAML tensor names to newly allocated device tensors.
@@ -498,22 +499,27 @@ class BenchmarkWorker:
             Tensors are regenerated for every shape and are not seeded.  This is
             suitable for performance tuning, not numerical-correctness testing.
         """
-        if len(dtypes) != len(self.spec.benchmark.args):
+        if len(dtypes) != len(self.spec.benchmark.tensors):
             raise BenchmarkExecutionError(
-                "ordered input dtypes must match benchmark.invoke.args"
+                "ordered input dtypes must match benchmark tensor recipes"
             )
         dtype_by_tensor = {
-            reference.name: dtype
-            for reference, dtype in zip(self.spec.benchmark.args, dtypes)
+            tensor.name: dtype
+            for tensor, dtype in zip(self.spec.benchmark.tensors, dtypes)
         }
+        active_tensor_names = set(
+            self.spec.benchmark.input_tensor_names_for(variant)
+        )
         tensors = {}
         for tensor in self.spec.benchmark.tensors:
-            shape = tuple(
-                int(evaluate_compiled(dim, values, {})) for dim in tensor.shape
-            )
-            if tensor.name not in dtype_by_tensor:
-                raise BenchmarkExecutionError(
-                    f"tensor {tensor.name!r} has no dtype because it is not an invoke arg"
+            if tensor.name not in active_tensor_names:
+                continue
+            if tensor.shape_ref is not None:
+                raw_shape = evaluate_compiled(tensor.shape_ref, values, {})
+                shape = tuple(int(dimension) for dimension in raw_shape)
+            else:
+                shape = tuple(
+                    int(evaluate_compiled(dim, values, {})) for dim in tensor.shape
                 )
             tensors[tensor.name] = self.device_runtime.make_tensor(
                 tensor.factory,
@@ -522,11 +528,12 @@ class BenchmarkWorker:
             )
         return tensors
 
-    def _invoke(self, tensors: Mapping[str, Any]) -> Any:
+    def _invoke(self, tensors: Mapping[str, Any], variant: str) -> Any:
         """Invoke the configured public operator with positional tensor inputs.
 
         Args:
             tensors: Tensor mapping returned by :meth:`_make_tensors`.
+            variant: Resolved variant selecting its declared argument sequence.
 
         Returns:
             The public FlagGems callable's result without post-processing.
@@ -536,8 +543,12 @@ class BenchmarkWorker:
             order.  Keyword arguments and YAML-selected callables are unsupported
             by design.
         """
+        inputs = {**self.spec.benchmark.scalars, **tensors}
         return self.operator(
-            *(tensors[reference.name] for reference in self.spec.benchmark.args)
+            *(
+                inputs[reference.name]
+                for reference in self.spec.benchmark.args_for(variant)
+            )
         )
 
     def _output_dtypes(self, value: Any) -> list[str]:
@@ -721,8 +732,13 @@ class BenchmarkWorker:
             )
         values = dict(payload["values"])
         variant = str(payload["variant"])
-        input_dtypes = [normalize_dtype_name(name) for name in dtype_names]
-        torch_dtypes = [self.device_runtime.dtype(name) for name in input_dtypes]
+        recipe_dtypes = [normalize_dtype_name(name) for name in dtype_names]
+        torch_dtypes = [self.device_runtime.dtype(name) for name in recipe_dtypes]
+        dtype_by_tensor = dict(zip(self.spec.benchmark.tensor_names, recipe_dtypes))
+        input_dtypes = [
+            dtype_by_tensor[name]
+            for name in self.spec.benchmark.input_tensor_names_for(variant)
+        ]
         kernel, tuner = self._find_tuner(variant)
         identity = (self.spec.op_id, variant)
         if identity not in self.base_states:
@@ -751,7 +767,7 @@ class BenchmarkWorker:
         for attr in ("bench_time", "configs_timings", "best_config"):
             tuner.__dict__.pop(attr, None)
 
-        tensors = self._make_tensors(values, torch_dtypes)
+        tensors = self._make_tensors(values, torch_dtypes, variant)
         self.device_runtime.synchronize()
         first_start = time.perf_counter()
         progress_interval = _progress_interval()
@@ -808,7 +824,7 @@ class BenchmarkWorker:
             tuner.do_bench = configured_do_bench
             try:
                 with tuner.use_run_mode(selected_run_mode):
-                    output = self._invoke(tensors)
+                    output = self._invoke(tensors, variant)
             finally:
                 tuner.do_bench = protocol_benchmark
         self.device_runtime.synchronize()
@@ -948,6 +964,13 @@ class BenchmarkWorker:
             The subprocess loop calls it only when batch fail-fast is disabled.
         """
         values = dict(payload["values"])
+        variant = str(payload["variant"])
+        recipe_dtypes = [normalize_dtype_name(name) for name in dtype_names]
+        dtype_by_tensor = dict(zip(self.spec.benchmark.tensor_names, recipe_dtypes))
+        input_dtypes = [
+            dtype_by_tensor[name]
+            for name in self.spec.benchmark.input_tensor_names_for(variant)
+        ]
         shape = [values[name] for name in self.spec.shape.identity]
         configs = payload.get("configs")
         device_name = self.device_runtime.descriptor.device_name
@@ -962,7 +985,7 @@ class BenchmarkWorker:
             "shape_key": ",".join(str(value) for value in shape),
             **values,
             "Count": payload.get("count"),
-            "input_dtypes": [normalize_dtype_name(name) for name in dtype_names],
+            "input_dtypes": input_dtypes,
             "output_dtypes": [],
             "dtype_key": None,
             "gpu": gpu_token,

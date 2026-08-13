@@ -83,6 +83,7 @@ class ResolvedBenchmarker:
 _REPLAY_IMPLEMENTATIONS = {
     "triton.backends.nvidia.driver": "triton_cuda_graph_replay_v1",
     "triton.backends.amd.driver": "triton_hip_graph_replay_v1",
+    "triton.backends.metax.driver": "triton_metax_graph_replay_v1",
 }
 _OFFICIAL_TRITON_REPLAY_COUNT = 10
 

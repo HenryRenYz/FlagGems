@@ -84,12 +84,22 @@ def test_official_triton_replay_uses_fixed_retry_count(monkeypatch):
     )
 
 
-def test_official_triton_metax_uses_graph_replay(monkeypatch):
-    active = _driver_for("triton.backends.metax.driver")
+@pytest.mark.parametrize(
+    ("module_name", "implementation"),
+    [
+        ("triton.backends.metax.driver", "triton_metax_graph_replay_v1"),
+        ("triton.backends.ppu.driver", "triton_ppu_graph_replay_v1"),
+        ("triton.backends.hcu.driver", "triton_hcu_graph_replay_v1"),
+    ],
+)
+def test_official_triton_vendor_backend_uses_graph_replay(
+    monkeypatch, module_name, implementation
+):
+    active = _driver_for(module_name)
     monkeypatch.setattr(benchmark_module, "driver", SimpleNamespace(active=active))
     observed = {}
 
-    def metax_do_bench_cudagraph(kernel_call, rep, quantiles, n_retries):
+    def vendor_do_bench_cudagraph(kernel_call, rep, quantiles, n_retries):
         observed.update(rep=rep, quantiles=quantiles, n_retries=n_retries)
         kernel_call()
         return [1.0, 0.8, 1.2]
@@ -97,7 +107,7 @@ def test_official_triton_metax_uses_graph_replay(monkeypatch):
     monkeypatch.setattr(
         triton_testing,
         "do_bench_cudagraph",
-        metax_do_bench_cudagraph,
+        vendor_do_bench_cudagraph,
     )
 
     resolved = benchmark_module.resolve_benchmarker(
@@ -115,7 +125,7 @@ def test_official_triton_metax_uses_graph_replay(monkeypatch):
         "n_retries": 5,
     }
     assert resolved.protocol.cache_key() == (
-        "triton_metax_graph_replay_v1",
+        implementation,
         25,
         100,
         5,

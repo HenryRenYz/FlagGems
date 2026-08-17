@@ -41,6 +41,7 @@ _RUNTIME_BACKENDS = {
     ),
     # MetaX MACA uses torch.cuda but owns its launcher visibility variable.
     "maca": _RuntimeBackend(("MACA_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES")),
+    "musa": _RuntimeBackend(("MUSA_VISIBLE_DEVICES",)),
 }
 
 

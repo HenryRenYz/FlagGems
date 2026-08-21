@@ -189,9 +189,7 @@ def test_missing_platform_package_uses_unadapted_tuning_routes(
     else:
         monkeypatch.setenv("USE_FLAGTUNE_COST_MODEL", use_cost_model)
 
-    mode = flagtune_runtime_mod.resolve_tuning_mode(
-        "mm", supports_cost_model=True
-    )
+    mode = flagtune_runtime_mod.resolve_tuning_mode("mm", supports_cost_model=True)
 
     assert mode.value == expected
 

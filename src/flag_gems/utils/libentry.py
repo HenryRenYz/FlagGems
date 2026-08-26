@@ -716,7 +716,7 @@ class LibTuner(triton.runtime.Autotuner):
     _supports_cost_model: Optional[bool] = None
 
     def apply_flagtune(self):
-        supports_cost_model = self._supports_cost_model
+        supports_cost_model = getattr(self, "_supports_cost_model", None)
         if supports_cost_model is None:
             supports_cost_model = self._supports_cost_model = (
                 _supports_flagtune_cost_model(self)

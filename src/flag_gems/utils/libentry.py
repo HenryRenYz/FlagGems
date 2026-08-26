@@ -1151,7 +1151,21 @@ class LibTuner(triton.runtime.Autotuner):
                 def bench(config: triton.Config) -> List[float]:
                     ret = cache.get(config)
                     if ret is None:
-                        ret = self._bench(*args, config=config, **kwargs)
+                        try:
+                            ret = self._bench(*args, config=config, **kwargs)
+                        except RuntimeError as e:
+                            # Some backend compilers raise RuntimeError for an
+                            # unsupported config instead of Triton's standard
+                            # autotuner exceptions. Skip that config so tuning
+                            # can continue with the remaining candidates.
+                            print(
+                                f"[libentry] config {config} failed to compile: {e}"
+                            )
+                            ret = (float("inf"),) * 3
+                        # A few backends return a scalar instead of Triton's
+                        # standard (p50, p20, p80) benchmark tuple.
+                        if isinstance(ret, (int, float)):
+                            ret = (ret, ret, ret)
                         if ret and all(math.isfinite(float(value)) for value in ret):
                             self.benchmark_success_count += 1
                         cache[config] = tuple(ret)

@@ -34,7 +34,13 @@ import logging
 
 import torch
 
-from flag_gems.ops.mul import mul_broadcast_func
+# FlagTune discovers LibTuner instances by scanning the public backend
+# operator's defining module. Keep the delegated generic kernels visible here.
+from flag_gems.ops.mul import (
+    mul_broadcast_2d_kernel as _mul_broadcast_2d_kernel,  # noqa: F401
+    mul_broadcast_func,
+    mul_scalar_kernel as _mul_scalar_kernel,  # noqa: F401
+)
 
 logger = logging.getLogger(__name__)
 

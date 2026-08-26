@@ -1154,16 +1154,22 @@ class LibTuner(triton.runtime.Autotuner):
                         try:
                             ret = self._bench(*args, config=config, **kwargs)
                         except RuntimeError as e:
-                            # Some backend compilers raise RuntimeError for an
-                            # unsupported config instead of Triton's standard
-                            # autotuner exceptions. Skip that config so tuning
-                            # can continue with the remaining candidates.
-                            print(
-                                f"[libentry] config {config} failed to compile: {e}"
-                            )
-                            ret = (float("inf"),) * 3
-                        # A few backends return a scalar instead of Triton's
-                        # standard (p50, p20, p80) benchmark tuple.
+                            # A config whose COMPILE raises a plain RuntimeError
+                            # is outside triton's autotuner catch list
+                            # (OutOfResources / CompileTimeAssertionFailure /
+                            # PTXASError) and would kill the whole process. Some
+                            # backend compilers do this — e.g. cambricon MLU
+                            # AutoTileForTritonPass raises "PassManager::run
+                            # failed" on a tensor.expand_shape it cannot tile.
+                            # Treat such a config as a non-candidate (inf) so
+                            # tuning continues and a working config is selected.
+                            print(f"[libentry] config {config} failed to compile: {e}")
+                            ret = (float("inf"), float("inf"), float("inf"))
+                        # Some Triton backends (e.g. tsingmicro with
+                        # use_cuda_graph=True) return a scalar float from
+                        # _bench instead of the standard (p50, p20, p80) tuple.
+                        # Normalize to a 3-element tuple for compatibility with
+                        # SQLPersistantModel.put_benchmark and other consumers.
                         if isinstance(ret, (int, float)):
                             ret = (ret, ret, ret)
                         if ret and all(math.isfinite(float(value)) for value in ret):

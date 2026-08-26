@@ -507,9 +507,7 @@ class BenchmarkWorker:
             tensor.name: dtype
             for tensor, dtype in zip(self.spec.benchmark.tensors, dtypes)
         }
-        active_tensor_names = set(
-            self.spec.benchmark.input_tensor_names_for(variant)
-        )
+        active_tensor_names = set(self.spec.benchmark.input_tensor_names_for(variant))
         tensors = {}
         for tensor in self.spec.benchmark.tensors:
             if tensor.name not in active_tensor_names:

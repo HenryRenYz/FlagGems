@@ -20,11 +20,11 @@ from triton.flagtune.contract.archive import (  # noqa: E402
     write_platform_package,
 )
 from triton.flagtune.contract.identity import ModelIdentity  # noqa: E402
+
 from flag_gems.flagtune.cli.package import (  # noqa: E402
     PackageAssemblyError,
     assemble_platform_package,
 )
-
 
 PLATFORM = "nvidia-h20"
 VERSION = "1.0.0"

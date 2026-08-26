@@ -365,9 +365,7 @@ class ShapeSchema:
             if name in canonical:
                 value = canonical[name]
             elif field.default is not _MISSING:
-                value = evaluate_compiled(
-                    field.default, normalized, _SHAPE_OPERATIONS
-                )
+                value = evaluate_compiled(field.default, normalized, _SHAPE_OPERATIONS)
             elif field.required:
                 raise OperatorConfigError(
                     f"{location} is missing required field {name!r}"
@@ -883,12 +881,8 @@ def _parse_benchmark(
             raise OperatorConfigError(
                 f"{location}.invoke.args must list every variant exactly once"
             )
-        compiled_args: tuple[SymbolRef, ...] | Mapping[
-            str, tuple[SymbolRef, ...]
-        ] = {
-            variant: compile_args(
-                args[variant], f"{location}.invoke.args.{variant}"
-            )
+        compiled_args: tuple[SymbolRef, ...] | Mapping[str, tuple[SymbolRef, ...]] = {
+            variant: compile_args(args[variant], f"{location}.invoke.args.{variant}")
             for variant in variants
         }
     else:

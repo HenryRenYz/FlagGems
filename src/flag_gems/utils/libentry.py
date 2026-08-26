@@ -24,7 +24,6 @@ import os
 import time
 import warnings
 from abc import abstractmethod
-from collections import OrderedDict
 from collections.abc import Mapping
 from contextlib import contextmanager
 from enum import Enum

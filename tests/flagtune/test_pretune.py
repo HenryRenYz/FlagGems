@@ -213,8 +213,7 @@ def test_mul_operator_yaml_compiles_broadcast_and_scalar_variants():
         )
         spec.resolve_variant(invalid)
     assert [
-        reference.name
-        for reference in spec.benchmark.args_for("broadcast_2d")
+        reference.name for reference in spec.benchmark.args_for("broadcast_2d")
     ] == ["lhs", "rhs"]
     assert [reference.name for reference in spec.benchmark.args_for("scalar")] == [
         "lhs",
@@ -294,9 +293,7 @@ def test_mul_executor_uses_variant_specific_tensor_and_scalar_arguments():
     scalar, _ = spec.shape.normalize_values(
         {"kind": "scalar", "lhs_shape": [18]}, "scalar"
     )
-    scalar_tensors = worker._make_tensors(
-        scalar, ["bfloat16", "bfloat16"], "scalar"
-    )
+    scalar_tensors = worker._make_tensors(scalar, ["bfloat16", "bfloat16"], "scalar")
     assert set(scalar_tensors) == {"lhs"}
     assert worker._invoke(scalar_tensors, "scalar") == (
         scalar_tensors["lhs"],

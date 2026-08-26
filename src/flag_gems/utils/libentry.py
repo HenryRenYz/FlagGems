@@ -25,6 +25,7 @@ import time
 import warnings
 from abc import abstractmethod
 from collections import OrderedDict
+from collections.abc import Mapping
 from contextlib import contextmanager
 from enum import Enum
 from functools import cached_property
@@ -160,6 +161,32 @@ def _validate_benchmark_retries(benchmark_retries: int) -> int:
     return benchmark_retries
 
 
+_TENSOR_TYPES: Optional[Tuple[Any, Tuple[type, ...]]] = None
+
+
+def _resolve_tensor_types() -> Tuple[Any, Tuple[type, ...]]:
+    """Resolve ``torch`` and the ``TensorDescriptor`` class once per process.
+
+    Both lookups used to run inside :func:`_infer_tensor_dtypes`, which is on
+    the per-launch dispatch path; re-executing the two ``import`` statements
+    there cost ~8us of every kernel launch on hygon.
+    """
+    global _TENSOR_TYPES
+    if _TENSOR_TYPES is None:
+        try:
+            import torch as torch_module
+        except ImportError:
+            torch_module = None
+        try:
+            from triton.tools.tensor_descriptor import TensorDescriptor
+
+            descriptor_types: Tuple[type, ...] = (TensorDescriptor,)
+        except ImportError:
+            descriptor_types = ()
+        _TENSOR_TYPES = (torch_module, descriptor_types)
+    return _TENSOR_TYPES
+
+
 def _infer_tensor_dtypes(values: Iterable[Any]) -> Tuple[Any, ...]:
     """Return dtypes of tensor kernel arguments in their argument order.
 
@@ -170,25 +197,151 @@ def _infer_tensor_dtypes(values: Iterable[Any]) -> Tuple[Any, ...]:
     result is shared by FlagTune identity, LibEntry dispatch keys, and
     LibTuner's persistent cache keys.
     """
-    try:
-        import torch
-    except ImportError:
+    torch_module, descriptor_types = _resolve_tensor_types()
+    if torch_module is None:
         return ()
 
-    try:
-        from triton.tools.tensor_descriptor import TensorDescriptor
-    except ImportError:
-        TensorDescriptor = ()
-
+    tensor_type = torch_module.Tensor
     dtypes = []
     for value in values:
-        if isinstance(value, torch.Tensor):
+        if isinstance(value, tensor_type):
             dtypes.append(value.dtype)
-        elif isinstance(value, TensorDescriptor) and isinstance(
-            value.base, torch.Tensor
-        ):
-            dtypes.append(value.base.dtype)
+        elif descriptor_types and isinstance(value, descriptor_types):
+            base = value.base
+            if isinstance(base, tensor_type):
+                dtypes.append(base.dtype)
     return tuple(dtypes)
+
+
+_DTYPE_STR_CACHE: Dict[Any, str] = {}
+
+
+def _dtype_strings(dtypes: Iterable[Any]) -> Tuple[str, ...]:
+    """Stringify dtypes through a cache.
+
+    ``str(torch.bfloat16)`` is ~1us and runs once per tensor argument per
+    launch; dtype objects are singletons, so caching is exact.
+    """
+    cache = _DTYPE_STR_CACHE
+    names = []
+    for dtype in dtypes:
+        name = cache.get(dtype)
+        if name is None:
+            name = str(dtype)
+            cache[dtype] = name
+        names.append(name)
+    return tuple(names)
+
+
+class _LaunchMeta(Mapping):
+    """Lazy read-only view of one launch's arguments for ``grid`` callables.
+
+    Materializing ``{**dict(zip(arg_names, args)), **kwargs, **constexprs}``
+    cost ~9us per launch, while a typical grid callable reads one or two names.
+    Lookup order reproduces that merge: constexprs win over kwargs, which win
+    over positional arguments.
+    """
+
+    __slots__ = ("_arg_index", "_args", "_kwargs", "_constexprs")
+
+    def __init__(self, arg_index, args, kwargs, constexprs):
+        self._arg_index = arg_index
+        self._args = args
+        self._kwargs = kwargs
+        self._constexprs = constexprs
+
+    def __getitem__(self, name):
+        constexprs = self._constexprs
+        if name in constexprs:
+            return constexprs[name]
+        kwargs = self._kwargs
+        if name in kwargs:
+            return kwargs[name]
+        index = self._arg_index.get(name)
+        args = self._args
+        if index is not None and index < len(args):
+            return args[index]
+        raise KeyError(name)
+
+    def __iter__(self):
+        seen = set()
+        args_len = len(self._args)
+        for name, index in self._arg_index.items():
+            if index < args_len:
+                seen.add(name)
+                yield name
+        for name in self._kwargs:
+            if name not in seen:
+                seen.add(name)
+                yield name
+        for name in self._constexprs:
+            if name not in seen:
+                seen.add(name)
+                yield name
+
+    def __len__(self):
+        return sum(1 for _ in self)
+
+
+_HYGON_TENSOR_SPEC: Any = False  # ``False`` means "not resolved yet"
+
+
+def _hygon_tensor_spec() -> Optional[Callable[[Any], str]]:
+    """Return hygon's extra tensor-specialization hook, or ``None``.
+
+    Resolved once instead of per tensor argument per launch: the vendor test,
+    the ``triton.backends.hcu.compiler`` import and the ``hasattr`` probe used
+    to run inside :meth:`LibEntry.key`.
+    """
+    global _HYGON_TENSOR_SPEC
+    if _HYGON_TENSOR_SPEC is False:
+        spec = None
+        if device.vendor_name == "hygon" and hasattr(triton.backends, "hcu"):
+            try:
+                from triton.backends.hcu.compiler import HIPBackend
+
+                spec = getattr(HIPBackend, "get_tensor_specialization", None)
+            except ImportError:
+                spec = None
+        _HYGON_TENSOR_SPEC = spec
+    return _HYGON_TENSOR_SPEC
+
+
+def _make_spec_arg(divisibility: int) -> Callable[[Any], Tuple[Any, ...]]:
+    """Build the per-argument specialization-key function for one LibEntry."""
+    tensor_spec = _hygon_tensor_spec()
+    if tensor_spec is None:
+
+        def spec_arg(arg):
+            if hasattr(arg, "data_ptr"):
+                return (arg.dtype, arg.data_ptr() % divisibility == 0)
+            return (type(arg), arg)
+
+    else:
+
+        def spec_arg(arg):
+            if hasattr(arg, "data_ptr"):
+                return (
+                    arg.dtype,
+                    arg.data_ptr() % divisibility == 0,
+                    tensor_spec(arg),
+                )
+            return (type(arg), arg)
+
+    return spec_arg
+
+
+def _dns_arg(arg):
+    """Dispatch-key contribution of one ``do_not_specialize`` argument."""
+    if hasattr(arg, "data_ptr"):
+        return arg.dtype
+    if not isinstance(arg, int):
+        return type(arg)
+    if -(2**31) <= arg and arg <= 2**31 - 1:
+        return "i32"
+    if 2**63 <= arg and arg <= 2**64 - 1:
+        return "u64"
+    return "i64"
 
 
 class Cache(object):
@@ -561,8 +714,14 @@ class LibTuner(triton.runtime.Autotuner):
         )
         self.cache = libcache[self.config_table_name]
 
+    _supports_cost_model: Optional[bool] = None
+
     def apply_flagtune(self):
-        supports_cost_model = _supports_flagtune_cost_model(self)
+        supports_cost_model = self._supports_cost_model
+        if supports_cost_model is None:
+            supports_cost_model = self._supports_cost_model = (
+                _supports_flagtune_cost_model(self)
+            )
         if self._flagtune_op_name is None and not supports_cost_model:
             return False
 
@@ -648,7 +807,7 @@ class LibTuner(triton.runtime.Autotuner):
                     enumerate(self.keys),
                 )
             )
-        key += tuple(str(dtype) for dtype in _infer_tensor_dtypes(args.values()))
+        key += _dtype_strings(_infer_tensor_dtypes(args.values()))
         return key
 
     def get_benchmark_key(self, args):
@@ -661,7 +820,7 @@ class LibTuner(triton.runtime.Autotuner):
         with different warmup/repetition durations from sharing one row.
         """
         key = tuple(args[k] for k in self.keys if k in args)
-        key += tuple(str(dtype) for dtype in _infer_tensor_dtypes(args.values()))
+        key += _dtype_strings(_infer_tensor_dtypes(args.values()))
         return key + tuple(self._benchmark_protocol)
 
     @abstractmethod
@@ -1538,6 +1697,20 @@ class LibEntry(triton.KernelInterface):
         self.lock = multiprocessing.Lock()
         self.signature = fn.signature
 
+        # Everything below is derived only from the signature and is reused by
+        # every launch.  `run` is the per-launch dispatch path, so recomputing
+        # any of it there is pure overhead.
+        self._param_names = tuple(self.signature.parameters.keys())
+        self._specialize_set = frozenset(self.specialize_indices)
+        self._do_not_specialize_set = frozenset(self.do_not_specialize_indices)
+        self._jit_params = tuple(self.jit_function.params)
+        self._keep_const_in_kargs = major_version == 3 and 3 <= minor_version <= 6
+        self._flagtune_stages = self._collect_flagtune_stages()
+        # Resolved on first use: importing the vendor backend at decoration
+        # time would run before the Triton driver is necessarily active.
+        self._spec_arg: Optional[Callable[[Any], Tuple[Any, ...]]] = None
+        self._arg_index: Optional[Dict[str, int]] = None
+
     @staticmethod
     def _contains_flagtune_tuner(fn):
         while not isinstance(fn, triton.runtime.JITFunction):
@@ -1554,68 +1727,60 @@ class LibEntry(triton.KernelInterface):
                 break
         return False
 
-    def _apply_flagtune(self):
-        changed = False
+    def _collect_flagtune_stages(self):
+        """Return the wrapper objects that expose ``apply_flagtune``.
+
+        The chain never changes after construction, so walking it once here
+        removes a per-launch traversal plus a ``getattr`` per wrapper.
+        """
+        stages = []
         fn = self.fn
         while not isinstance(fn, triton.runtime.JITFunction):
-            apply_flagtune = getattr(fn, "apply_flagtune", None)
-            if apply_flagtune is not None:
-                changed = apply_flagtune() or changed
+            if getattr(fn, "apply_flagtune", None) is not None:
+                stages.append(fn)
             fn = getattr(fn, "fn", None)
             if fn is None:
                 break
+        return tuple(stages)
+
+    def _apply_flagtune(self):
+        changed = False
+        for stage in self._flagtune_stages:
+            changed = stage.apply_flagtune() or changed
         if changed:
             for cache in self.kernel_cache:
                 cache.clear()
 
     def key(self, spec_args, dns_args, const_args):
-        def spec_arg(arg):
-            if hasattr(arg, "data_ptr"):
-                if device.vendor_name == "hygon" and hasattr(triton.backends, "hcu"):
-                    from triton.backends.hcu.compiler import HIPBackend
-
-                    if hasattr(HIPBackend, "get_tensor_specialization"):
-                        return (
-                            arg.dtype,
-                            arg.data_ptr() % self.divisibility == 0,
-                            HIPBackend.get_tensor_specialization(arg),
-                        )
-                return (arg.dtype, arg.data_ptr() % self.divisibility == 0)
-            return (type(arg), arg)
-
-        def dns_arg(arg):
-            if hasattr(arg, "data_ptr"):
-                return arg.dtype
-            if not isinstance(arg, int):
-                return type(arg)
-            if -(2**31) <= arg and arg <= 2**31 - 1:
-                return "i32"
-            if 2**63 <= arg and arg <= 2**64 - 1:
-                return "u64"
-            return "i64"
-
+        spec_arg = self._spec_arg
+        if spec_arg is None:
+            spec_arg = self._spec_arg = _make_spec_arg(self.divisibility)
         spec_key = [spec_arg(arg) for arg in spec_args]
-        dns_key = [dns_arg(arg) for arg in dns_args]
+        dns_key = [_dns_arg(arg) for arg in dns_args]
         # const args passed by position
-        return tuple(spec_key + dns_key + const_args)
+        return tuple(spec_key + dns_key + list(const_args))
 
     def run(self, *args, **kwargs):
         grid = kwargs["grid"]
         if self._has_flagtune_tuner:
             self._apply_flagtune()
 
-        # collect all the arguments
-        spec_args = []  # specialize arguments
-        dns_args = []  # do not specialize arguments
+        # Collect the arguments and their dispatch-key contributions in one
+        # pass: `key()` used to walk the collected lists a second time.
+        spec_arg = self._spec_arg
+        if spec_arg is None:
+            spec_arg = self._spec_arg = _make_spec_arg(self.divisibility)
+        spec_key = []  # key parts of specialize arguments
+        dns_key = []  # key parts of do-not-specialize arguments
         const_args = []  # constexpr arguments
-        k_args = OrderedDict()
-        param_names = list(self.signature.parameters.keys())
+        k_args = {}
+        param_names = self._param_names
+        specialize_set = self._specialize_set
+        do_not_specialize_set = self._do_not_specialize_set
+        keep_const_in_kargs = self._keep_const_in_kargs
         for i, arg in enumerate(args):
             hashable_arg = arg
-            if (
-                hasattr(arg, "__class__")
-                and arg.__class__.__name__ == "TensorDescriptor"
-            ):
+            if type(arg).__name__ == "TensorDescriptor":
                 # Create a hashable representation of TensorDescriptor
                 hashable_arg = (
                     "TensorDescriptor",
@@ -1625,19 +1790,20 @@ class LibEntry(triton.KernelInterface):
                     arg.padding if hasattr(arg, "padding") else None,
                     # Add other relevant attributes
                 )
-            if i in self.specialize_indices:
+            if i in specialize_set:
                 k_args[param_names[i]] = arg
-                spec_args.append(hashable_arg)
-            elif i in self.do_not_specialize_indices:
+                spec_key.append(spec_arg(hashable_arg))
+            elif i in do_not_specialize_set:
                 k_args[param_names[i]] = arg
-                dns_args.append(hashable_arg)
+                dns_key.append(_dns_arg(hashable_arg))
             else:
-                if major_version == 3 and 3 <= minor_version <= 6:
+                if keep_const_in_kargs:
                     k_args[param_names[i]] = arg
                 const_args.append(hashable_arg)
-        for p in self.jit_function.params[len(args) :]:
-            if p.name in kwargs:
-                val = kwargs[p.name]
+        for p in self._jit_params[len(args) :]:
+            name = p.name
+            if name in kwargs:
+                val = kwargs[name]
             elif p.default is inspect._empty:
                 continue
             else:
@@ -1645,22 +1811,21 @@ class LibEntry(triton.KernelInterface):
 
             if p.is_constexpr:
                 const_args.append(val)
-                if major_version == 3 and 3 <= minor_version <= 6:
-                    k_args[p.name] = val
+                if keep_const_in_kargs:
+                    k_args[name] = val
             elif p.do_not_specialize:
-                dns_args.append(val)
-                k_args[p.name] = val
+                dns_key.append(_dns_arg(val))
+                k_args[name] = val
             else:
-                spec_args.append(val)
-                k_args[p.name] = val
+                spec_key.append(spec_arg(val))
+                k_args[name] = val
 
         if self._has_flagtune_tuner:
-            flagtune_dtypes = _infer_tensor_dtypes(args)
             const_args.append(
-                ("flagtune_dtypes",) + tuple(str(value) for value in flagtune_dtypes)
+                ("flagtune_dtypes",) + _dtype_strings(_infer_tensor_dtypes(args))
             )
 
-        entry_key = self.key(spec_args, dns_args, const_args)
+        entry_key = tuple(spec_key + dns_key + const_args)
         device = torch_device_fn.current_device()
         # CPU has one device per process and `current_device()` returns the
         # string "cpu" (can't index into the int-keyed `kernel_cache` tuple).
@@ -1670,11 +1835,13 @@ class LibEntry(triton.KernelInterface):
             cache = self._cpu_cache
         else:
             cache = self.kernel_cache[device]
-        while entry_key not in cache:
+        entry = cache.get(entry_key)
+        while entry is None:
             # NOTE: we serialize the first run of a jit function regardless of which device to run on
             # because Triton runtime is currently not threadsafe.
             with self.lock:
-                if entry_key in cache:
+                entry = cache.get(entry_key)
+                if entry is not None:
                     break
                 kernel = self.fn.run(*args, **kwargs)
                 fn = self.fn
@@ -1730,7 +1897,7 @@ class LibEntry(triton.KernelInterface):
             tune_constexprs,
             heur_constexprs,
             launch_pre_hooks,
-        ) = cache[entry_key]
+        ) = entry
 
         if callable(grid):
             # collect all arguments to the grid fn，ie:
@@ -1738,8 +1905,12 @@ class LibEntry(triton.KernelInterface):
             # 2. kwargs,
             # 3. all all other captured arguments in CompiledKernel from Autotunner & Heuristics
             # when kwargs & captured args conflict, captured args have higher priority
-            meta = {**dict(zip(self.arg_names, args)), **kwargs, **constexprs}
-            grid = grid(meta)
+            arg_index = self._arg_index
+            if arg_index is None:
+                arg_index = self._arg_index = {
+                    name: i for i, name in enumerate(self.arg_names)
+                }
+            grid = grid(_LaunchMeta(arg_index, args, kwargs, constexprs))
         grid = grid + (1, 1)
 
         if launch_pre_hooks:
@@ -1747,21 +1918,26 @@ class LibEntry(triton.KernelInterface):
             for pre_hook, hook_kwargs in launch_pre_hooks:
                 pre_hook({**hook_nargs, **hook_kwargs})
 
-        if major_version == 3 and 3 <= minor_version <= 6:
-            all_args = []
-            missing_keys = []
-            for key in list(self.signature.parameters.keys()):
-                if key in k_args:
-                    all_args.append(k_args[key])
-                elif key in tune_constexprs:
-                    all_args.append(tune_constexprs[key])
-                elif key in heur_constexprs:
-                    all_args.append(heur_constexprs[key])
-                elif key in constexprs:
-                    all_args.append(constexprs[key])
-                else:
-                    missing_keys.append(key)
-                if len(missing_keys):
+        if keep_const_in_kargs:
+            # `k_args` is filled in signature order, so when it covers every
+            # parameter its values already are the launch argument list.
+            if len(k_args) == len(param_names):
+                all_args = list(k_args.values())
+            else:
+                all_args = []
+                missing_keys = []
+                for key in param_names:
+                    if key in k_args:
+                        all_args.append(k_args[key])
+                    elif key in tune_constexprs:
+                        all_args.append(tune_constexprs[key])
+                    elif key in heur_constexprs:
+                        all_args.append(heur_constexprs[key])
+                    elif key in constexprs:
+                        all_args.append(constexprs[key])
+                    else:
+                        missing_keys.append(key)
+                if missing_keys:
                     raise RuntimeError(
                         f"[libentry]: probably a bug, the following kernel params where not captured: {missing_keys}"
                     )

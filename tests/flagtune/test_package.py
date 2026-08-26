@@ -2,29 +2,38 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 from pathlib import Path
 
 import pytest
 import yaml
 
-pytest.importorskip(
-    "triton.flagtune.contract.archive",
+try:
+    HAS_FLAGTREE_ARCHIVE = (
+        importlib.util.find_spec("triton.flagtune.contract.archive") is not None
+    )
+except ModuleNotFoundError:
+    HAS_FLAGTREE_ARCHIVE = False
+
+pytestmark = pytest.mark.skipif(
+    not HAS_FLAGTREE_ARCHIVE,
     reason="platform-package assembly requires the optional FlagTree package",
 )
 
-from triton.flagtune.contract.archive import (  # noqa: E402
-    platform_package_name,
-    read_platform_package,
-    write_model_archive,
-    write_platform_package,
-)
-from triton.flagtune.contract.identity import ModelIdentity  # noqa: E402
+if HAS_FLAGTREE_ARCHIVE:
+    from triton.flagtune.contract.archive import (  # noqa: E402
+        platform_package_name,
+        read_platform_package,
+        write_model_archive,
+        write_platform_package,
+    )
+    from triton.flagtune.contract.identity import ModelIdentity  # noqa: E402
 
-from flag_gems.flagtune.cli.package import (  # noqa: E402
-    PackageAssemblyError,
-    assemble_platform_package,
-)
+    from flag_gems.flagtune.cli.package import (  # noqa: E402
+        PackageAssemblyError,
+        assemble_platform_package,
+    )
 
 PLATFORM = "nvidia-h20"
 VERSION = "1.0.0"

@@ -22,6 +22,16 @@ from . import accuracy_utils as utils
 SILU_AND_MUL_WITH_CLAMP_LIMITS = [3.0, 7.0]
 
 
+def test_silu_and_mul_with_clamp_limit_is_scalar_kernel_argument():
+    from flag_gems.fused.silu_and_mul_with_clamp import (
+        silu_and_mul_with_clamp_grad_kernel,
+        silu_and_mul_with_clamp_kernel,
+    )
+
+    assert silu_and_mul_with_clamp_kernel.fx.is_tensor(2) is False
+    assert silu_and_mul_with_clamp_grad_kernel.fx.is_tensor(3) is False
+
+
 @pytest.mark.silu_and_mul_with_clamp
 @pytest.mark.parametrize("shape", utils.POINTWISE_SHAPES)
 @pytest.mark.parametrize("dtype", utils.FLOAT_DTYPES)

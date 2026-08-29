@@ -409,6 +409,17 @@ def router_gemm_input_fn(b, m, n, k, cur_dtype, device, b_column_major):
     yield x, weight
 
 
+SILU_AND_MUL_WITH_CLAMP_LIMIT = 7.0
+SILU_AND_MUL_WITH_CLAMP_FLOPS_PER_ELEMENT = 8
+
+
+def silu_and_mul_with_clamp_input_fn(shape, cur_dtype, device):
+    """Generate the two pointwise inputs and the scalar clamp limit."""
+    x = torch.randn(shape, dtype=cur_dtype, device=device)
+    y = torch.randn(shape, dtype=cur_dtype, device=device)
+    yield x, y, SILU_AND_MUL_WITH_CLAMP_LIMIT
+
+
 # ============================================================================
 # FP8 utilities (from test_blas_perf.py)
 # ============================================================================
@@ -1031,6 +1042,26 @@ class ParallelAddrBenchmark(ParallelBenchmarkMixin, AddrBenchmark):
     pass
 
 
+class ParallelSiluAndMulWithClampBenchmark(ParallelBenchmarkMixin, Benchmark):
+    SHAPE_CONFIG_KEYS = ("silu_and_mul_with_clamp",)
+    DEFAULT_METRICS = DEFAULT_METRICS[:] + ["tflops"]
+    DEFAULT_DTYPES = FLOAT_DTYPES
+    DEFAULT_SHAPES = [(1, 1)]
+    DEFAULT_SHAPE_DESC = "M, N"
+    DEFAULT_SHAPE_FILES = os.path.join(os.path.dirname(__file__), "core_shapes.yaml")
+
+    def get_input_iter(self, cur_dtype) -> Generator:
+        for shape in self.shapes:
+            yield from silu_and_mul_with_clamp_input_fn(
+                shape, cur_dtype, self.device
+            )
+
+    def get_tflops(self, op, *args, **kwargs):
+        # Approximate the fused pointwise work as eight FLOPs per output element:
+        # clamp(gate), sigmoid/SILU, clamp(up), and the final multiply.
+        return args[0].numel() * SILU_AND_MUL_WITH_CLAMP_FLOPS_PER_ELEMENT
+
+
 class ParallelMulBenchmark(ParallelBenchmarkMixin, Benchmark):
     SHAPE_CONFIG_KEYS = ("mul",)
     DEFAULT_METRICS = DEFAULT_METRICS[:] + ["tflops"]
@@ -1498,6 +1529,25 @@ def test_perf_mul():
         dtypes=FLOAT_DTYPES,
     )
     bench.set_gems(flag_gems.mul)
+    bench.run()
+
+
+@pytest.mark.silu_and_mul_with_clamp
+@pytest.mark.skipif(
+    flag_gems.vendor_name == "tsingmicro", reason="Issue #4131: not working"
+)
+def test_perf_silu_and_mul_with_clamp():
+    def torch_silu_and_mul_with_clamp(x, y, limit):
+        gate = torch.clamp(x, max=limit)
+        up = torch.clamp(y, min=-limit, max=limit)
+        return torch.mul(torch.nn.functional.silu(gate), up)
+
+    bench = ParallelSiluAndMulWithClampBenchmark(
+        op_name="silu_and_mul_with_clamp",
+        torch_op=torch_silu_and_mul_with_clamp,
+        dtypes=FLOAT_DTYPES,
+    )
+    bench.set_gems(flag_gems.silu_and_mul_with_clamp)
     bench.run()
 
 

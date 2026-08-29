@@ -40,7 +40,7 @@ from flag_gems.ops.mul import (  # noqa: F401
     mul_broadcast_2d_kernel as _mul_broadcast_2d_kernel,
 )
 from flag_gems.ops.mul import mul_broadcast_func
-from flag_gems.ops.mul import mul_scalar_kernel as _mul_scalar_kernel
+from flag_gems.ops.mul import mul_scalar_kernel as _mul_scalar_kernel  # noqa: F401
 
 logger = logging.getLogger(__name__)
 

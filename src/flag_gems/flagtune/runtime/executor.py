@@ -1,3 +1,17 @@
+# Copyright 2026 FlagOS Contributors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """Prepare and execute data-driven FlagTune workloads on GPU workers.
 
 The parent process uses :func:`prepare_benchmark_case` to normalize arbitrary
@@ -654,6 +668,126 @@ class BenchmarkWorker:
             )
 
         return tuple(statistics.median(values) for values in zip(*trial_quantiles))
+
+    def measure_configs(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        dtype_names: Sequence[str],
+        config_records: Mapping[str, Mapping[str, Any]],
+        warmup: int,
+        iterations: int,
+        trials: int,
+        benchmark_mode: str,
+        benchmark_retries: int,
+    ) -> dict[str, list[tuple[float, float, float]]]:
+        """Measure several explicit configs for one shape, interleaved in place.
+
+        Args:
+            payload: Prepared task mapping from
+                :func:`prepare_benchmark_case`.
+            dtype_names: Ordered benchmark tensor-recipe dtype names.
+            config_records: Ordered label-to-config mapping. Labels are opaque
+                caller identifiers such as ``'baseline'`` and ``'ours'``; values
+                are flattened config records accepted by :meth:`_make_configs`.
+            warmup: Triton warmup duration in milliseconds for every trial.
+            iterations: Triton repetition duration in milliseconds per trial.
+            trials: Positive number of measurements taken for each config.
+            benchmark_mode: Architecture-neutral ``event`` or ``replay`` mode.
+            benchmark_retries: Replay samples sharing each trial's budget.
+
+        Returns:
+            Mapping from each input label to ``trials`` finite ``(p20, p50,
+            p80)`` millisecond tuples in measurement order. The caller owns all
+            summarization; nothing is reduced, ranked, or compared here.
+
+        Raises:
+            BenchmarkExecutionError: If the payload no longer matches the loaded
+            operator config, the request is empty, a duration or trial count is
+            invalid, or a config produces incomplete quantiles.
+
+        Implementation:
+            Every config is measured through :meth:`LibTuner.benchmark_config`,
+            which bypasses ConfigCache and BenchmarkCache, so repeated trials
+            are genuinely independent instead of replaying one stored sample.
+            That API needs the low-level argument context captured by
+            ``LibTuner.run``; this method obtains it by scoping the tuner to a
+            single config, which takes ``run``'s no-policy branch and selects
+            that config without tuning or touching either cache. The label order
+            is reversed on every odd trial so drift across the measurement
+            window cannot systematically favour whichever side is measured
+            first.
+
+        Limitations:
+            This measures fixed-config kernel device time for one shape on the
+            calling process's device. It deliberately does not spread work over
+            workers: interleaving all labels in one process is what removes the
+            between-process error term, and it is not preserved if the labels
+            are measured by different processes or at different times.
+        """
+        if payload.get("config_sha256") != self.spec.source_sha256:
+            raise BenchmarkExecutionError(
+                "operator config changed after task preparation"
+            )
+        if not config_records:
+            raise BenchmarkExecutionError(
+                "measure_configs requires at least one config"
+            )
+        if warmup < 0:
+            raise BenchmarkExecutionError("warmup must be non-negative")
+        if iterations <= 0:
+            raise BenchmarkExecutionError("iterations must be positive")
+        if trials <= 0:
+            raise BenchmarkExecutionError("trials must be positive")
+
+        values = dict(payload["values"])
+        variant = str(payload["variant"])
+        recipe_dtypes = [normalize_dtype_name(name) for name in dtype_names]
+        torch_dtypes = [self.device_runtime.dtype(name) for name in recipe_dtypes]
+        kernel, tuner = self._find_tuner(variant)
+        identity = (self.spec.op_id, variant)
+        if identity not in self.base_states:
+            tuner.apply_flagtune()
+            self.base_states[identity] = (list(tuner.configs), list(tuner.strategy))
+        base_configs, base_strategy = self.base_states[identity]
+
+        labels = list(config_records)
+        configs = dict(
+            zip(
+                labels,
+                self._make_configs([config_records[label] for label in labels], tuner),
+            )
+        )
+        tensors = self._make_tensors(values, torch_dtypes, variant)
+
+        from flag_gems.utils.libentry import clear_libentry_dispatch_cache
+
+        clear_libentry_dispatch_cache(kernel)
+        tuner._set_configs_and_strategy([configs[labels[0]]], base_strategy)
+        try:
+            self._invoke(tensors, variant)
+            self.device_runtime.synchronize()
+        finally:
+            tuner._set_configs_and_strategy(base_configs, base_strategy)
+            clear_libentry_dispatch_cache(kernel)
+
+        samples: dict[str, list[tuple[float, float, float]]] = {
+            label: [] for label in labels
+        }
+        for trial in range(trials):
+            order = labels if trial % 2 == 0 else list(reversed(labels))
+            for label in order:
+                config = configs[label]
+                raw = tuner.benchmark_config(
+                    config,
+                    warmup=warmup,
+                    rep=iterations,
+                    benchmark_mode=benchmark_mode,
+                    benchmark_retries=benchmark_retries,
+                    quantiles=(0.5, 0.2, 0.8),
+                )
+                samples[label].append(self._single_config_quantiles({config: raw}))
+        return samples
 
     def benchmark(
         self,

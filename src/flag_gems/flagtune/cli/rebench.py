@@ -286,14 +286,14 @@ def _resolve_dtypes(dtypes: str, tensor_count: int) -> list[str]:
 
 
 def _sweep_quantiles(
-    trials: Sequence[tuple[float, float, float]]
+    trials: Sequence[tuple[float, float, float]],
 ) -> tuple[float, float, float]:
     """Reduce one sweep's trials to a median p20/p50/p80 triple."""
     return tuple(statistics.median(values) for values in zip(*trials))
 
 
 def _reduce_sweeps(
-    sweeps: Sequence[tuple[float, float, float]]
+    sweeps: Sequence[tuple[float, float, float]],
 ) -> tuple[float, float, float]:
     """Reduce per-sweep quantiles to the reported median triple."""
     return tuple(statistics.median(values) for values in zip(*sweeps))
@@ -495,9 +495,7 @@ def summarize(
     confirmable = sweeps >= 2
     rows: list[dict[str, Any]] = []
     for index in sorted(collected):
-        per_side = {
-            side: _reduce_sweeps(collected[index][side]) for side in SIDES
-        }
+        per_side = {side: _reduce_sweeps(collected[index][side]) for side in SIDES}
         baseline_p50 = per_side["baseline"][1]
         ours_p50 = per_side["ours"][1]
         relative = baseline_p50 / ours_p50 * 100.0
@@ -542,9 +540,7 @@ def summarize(
     weighted_baseline = sum(
         row["baseline_latency_p50_ms"] * row["Count"] for row in weighted
     )
-    weighted_ours = sum(
-        row["ours_latency_p50_ms"] * row["Count"] for row in weighted
-    )
+    weighted_ours = sum(row["ours_latency_p50_ms"] * row["Count"] for row in weighted)
     below = [row for row in rows if row["below_threshold"]]
     return {
         "rows": rows,

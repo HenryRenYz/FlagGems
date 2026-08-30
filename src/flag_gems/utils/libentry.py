@@ -734,13 +734,32 @@ class LibTuner(triton.runtime.Autotuner):
         if mode is self._flagtune_mode:
             return False
 
+        configs, strategy = self._flagtune_configs_for_mode(op_name, mode)
+        self._set_configs_and_strategy(configs, strategy, mode=mode)
+        return True
+
+    def _flagtune_configs_for_mode(self, op_name, mode):
+        """Return the config space this tuner uses under ``mode``.
+
+        Args:
+            op_name: Operator name used only in the unavailable-config warning.
+            mode: Resolved tuning mode. Only ``EXPANDED`` reads the YAML space;
+                every other mode keeps the tuner's declared default configs.
+
+        Returns:
+            ``(configs, strategy)`` ready for :meth:`_set_configs_and_strategy`.
+
+        Notes:
+            Cost Model shares Default's config space because the proposer
+            enumerates its own candidates from the model's parameter space and
+            ignores whatever the tuner carries. Expanded falls back to the
+            default configs when the operator has no usable YAML entry, warning
+            once per tuner. Keeping the mode-to-space mapping here alone lets
+            the Cost Model fallback path resolve it the same way instead of
+            assuming the space it happens to find installed.
+        """
         if mode is not runtime.TuningMode.EXPANDED:
-            self._set_configs_and_strategy(
-                self._flagtune_default_configs,
-                self._flagtune_default_strategy,
-                mode=mode,
-            )
-            return True
+            return self._flagtune_default_configs, self._flagtune_default_strategy
 
         if self._flagtune_expand_op_name is None:
             expand_config = -1
@@ -762,19 +781,9 @@ class LibTuner(triton.runtime.Autotuner):
                     self._flagtune_expand_op_name or op_name,
                 )
                 self._flagtune_warned = True
-            self._set_configs_and_strategy(
-                self._flagtune_default_configs,
-                self._flagtune_default_strategy,
-                mode=mode,
-            )
-            return True
+            return self._flagtune_default_configs, self._flagtune_default_strategy
 
-        self._set_configs_and_strategy(
-            configs,
-            expand_config["strategy"],
-            mode=mode,
-        )
-        return True
+        return configs, expand_config["strategy"]
 
     @cached_property
     def cache_key(self) -> str:
@@ -1249,6 +1258,7 @@ class LibTuner(triton.runtime.Autotuner):
 _FLAGTUNE_PROPOSER_POOL: Dict[Any, Any] = {}
 _FLAGTUNE_VARIANT_INFO_POOL: Dict[Any, Any] = {}
 _FLAGTUNE_AVAILABILITY: Optional[Tuple[bool, Optional[BaseException]]] = None
+_FLAGTUNE_MISSING_BUNDLE_WARNED: set = set()
 
 
 def _flagtune_available() -> Tuple[bool, Optional[BaseException]]:
@@ -1277,10 +1287,14 @@ def _ensure_flagtune_proposer(identity):
         complete identity plus the model version selected by FlagTree.
 
     Raises:
-        FileNotFoundError: If the model bundle cannot be resolved.
-        Exception: Model dependency or config errors from proposer creation are
-            intentionally propagated to :func:`flagtune_policy`, which logs a
-            warning once and falls back.
+        ModelBundleMissingError: If the resolved platform package carries no
+            bundle for this identity. :func:`flagtune_policy` treats this as an
+            unadapted operator, warns once, and falls back to Expanded.
+        Exception: Every other failure propagates unchanged, including a missing
+            optional dependency, an incompatible FlagTune version, a corrupt
+            archive, and any resolution error. These are environment or
+            packaging faults, not a statement that the operator is unadapted, so
+            they must not be disguised as one.
 
     Notes:
         FlagTree's shared model manager remains responsible for package refresh
@@ -1412,6 +1426,11 @@ def flagtune_policy(
         ``USE_FLAGTUNE_COST_MODEL=0`` explicitly selects Expanded.
         Official Triton treats model annotations as unadapted because it does
         not provide the FlagTree Cost Model runtime.
+        A package without a bundle for this identity warns once and falls back
+        to the default policy over the config space the unadapted routes select,
+        which is Expanded or Default depending on ``USE_FLAGTUNE`` and
+        ``FLAGTUNE_INCLUDE``. The platform-level availability probe cannot see a
+        missing bundle because it only asks whether the platform has a package.
         Enabled integration and candidate benchmark failures propagate. The
         proposer may invoke ``bench_fn`` before the final selection loop, but
         LibTuner's benchmark cache normally prevents duplicate device
@@ -1463,7 +1482,37 @@ def flagtune_policy(
     )
     identity = model_identity.artifact_key
 
-    proposer, variant_info = _ensure_flagtune_proposer(model_identity)
+    from triton.flagtune.runtime.model_loader import ModelBundleMissingError
+
+    try:
+        proposer, variant_info = _ensure_flagtune_proposer(model_identity)
+    except ModelBundleMissingError as exc:
+        # A platform package covers only the identities it was built for, so a
+        # missing bundle means this operator is unadapted for these dtypes rather
+        # than that anything is broken. Packaging faults stay loud: the
+        # build-time identity checks in the package CLI catch a package that was
+        # meant to include this.
+        #
+        # Resolve the mode again with the capability suppressed instead of
+        # assuming one. Cost Model runs on the tuner's default configs, so
+        # reusing them here would silently mean Default even where the unadapted
+        # rules ask for Expanded. Nothing on the tuner is mutated: coverage is
+        # per identity, and another dtype on this same tuner may still have a
+        # bundle.
+        fallback_mode = runtime.resolve_tuning_mode(op_name, supports_cost_model=False)
+        fallback_configs, _ = self._flagtune_configs_for_mode(op_name, fallback_mode)
+        if identity not in _FLAGTUNE_MISSING_BUNDLE_WARNED:
+            _FLAGTUNE_MISSING_BUNDLE_WARNED.add(identity)
+            logger.warning(
+                "FlagTune has no model for %s; falling back to %s tuning over %d configs (%s)",
+                identity,
+                fallback_mode.value,
+                len(fallback_configs),
+                exc,
+            )
+        return LibTuner.get("default").policy(
+            self, bench_fn, list(fallback_configs), args, kwargs
+        )
     shape = variant_info.normalize_inputs(self.nargs)
 
     param_fields = variant_info.param_names

@@ -79,14 +79,6 @@ variants:
       - {name: log2_grid_size, op: log2, args: [grid_size]}
       - {name: tail_elements, op: mod, args: [n_elements, BLOCK_SIZE]}
       - {name: block_to_cols, op: fdiv, args: [BLOCK_SIZE, n_cols]}
-      # Elements each thread handles. Winners cluster on this ratio far more
-      # tightly than on BLOCK_SIZE alone once conditioned on problem size:
-      # entropy 1.00 vs 1.95 bit for n_elements > 1e6, 1.74 vs 2.20 in the
-      # middle band. 47% of the 83 measured shapes want exactly 256.
-      - {name: elems_per_thread, op: fdiv, args: [BLOCK_SIZE, num_warps]}
-      # How much of the last block is wasted. The absolute tail_elements above
-      # only reached 2.2% gain because the useful quantity is the fraction.
-      - {name: tail_frac, op: fdiv, args: [tail_elements, BLOCK_SIZE]}
 
   scalar:
     inputs:
@@ -104,5 +96,3 @@ variants:
       - {name: grid_size, op: cdiv, args: [n_elements, BLOCK_SIZE]}
       - {name: log2_grid_size, op: log2, args: [grid_size]}
       - {name: tail_elements, op: mod, args: [n_elements, BLOCK_SIZE]}
-      - {name: elems_per_thread, op: fdiv, args: [BLOCK_SIZE, num_warps]}
-      - {name: tail_frac, op: fdiv, args: [tail_elements, BLOCK_SIZE]}

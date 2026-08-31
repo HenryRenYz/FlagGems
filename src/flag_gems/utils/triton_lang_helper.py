@@ -91,6 +91,14 @@ def _fallback_erfinv(x):
 
 
 @triton.jit
+def _fallback_normcdfinv(x):
+    result = 1.4142135623730951 * _fallback_erfinv(2.0 * x - 1.0)
+    result = tl.where(x == 0.0, float("-inf"), result)
+    result = tl.where(x == 1.0, float("inf"), result)
+    return tl.where((x < 0.0) | (x > 1.0), float("nan"), result)
+
+
+@triton.jit
 def _fallback_floor(x):
     trunc = x.to(tl.int32).to(x.dtype)
     needs_adjust = (x < 0.0) & (x != trunc)
@@ -1250,6 +1258,7 @@ _FALLBACK_SYMBOLS = {
     "j1": _fallback_j1,
     "log2": _fallback_log2,
     "nextafter": _fallback_nextafter,
+    "normcdfinv": _fallback_normcdfinv,
     "sinpi": _fallback_sinpi,
     "y0": _fallback_y0,
     "y1": _fallback_y1,
@@ -1309,6 +1318,7 @@ tl_extra_shim = _patch_missing_symbols(
         "log",
         "log2",
         "nextafter",
+        "normcdfinv",
         "pow",
         "rint",
         "rsqrt",

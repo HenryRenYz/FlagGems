@@ -91,11 +91,26 @@ def _fallback_erfinv(x):
 
 
 @triton.jit
-def _fallback_normcdfinv(x):
-    result = 1.4142135623730951 * _fallback_erfinv(2.0 * x - 1.0)
-    result = tl.where(x == 0.0, float("-inf"), result)
-    result = tl.where(x == 1.0, float("inf"), result)
-    return tl.where((x < 0.0) | (x > 1.0), float("nan"), result)
+def _fallback_normcdfinv(p):
+    # Inverse of the standard normal CDF, used when a backend's libdevice lacks
+    # a native normcdfinv (e.g. the hip-based hygon fork).  Composed from
+    # _fallback_erfinv via ndtri(p) = sqrt(2) * erfinv(2p - 1), then polished
+    # with Newton iterations on Phi(x) = 0.5 * (1 + erf(x / sqrt(2))).
+    # special_ndtri.py notes the unpolished composition drifts to ~1.3e-05 abs
+    # error in float32; the refinement below brings it back near libdevice
+    # accuracy.  phi -> 0 as |x| -> inf, so the Newton step degenerates (0/0)
+    # for lanes where p is at/near 0 or 1 -- keep the erfinv estimate there.
+    x = 1.4142135623730951 * _fallback_erfinv(2.0 * p - 1.0)
+    # _fallback_erfinv hits 0/0 (-> nan) at the exact endpoints, where
+    # erfinv(+-1) is infinite; restore the exact values PyTorch/libdevice give.
+    x = tl.where(p == 0.0, float("-inf"), x)
+    x = tl.where(p == 1.0, float("inf"), x)
+    for _ in range(3):
+        phi = 0.3989422804014327 * tl.exp(-0.5 * x * x)  # 1 / sqrt(2*pi)
+        cdf = 0.5 * (1.0 + tl.math.erf(0.7071067811865476 * x))
+        step = tl.where((phi > 0.0) & (cdf == cdf), (cdf - p) / phi, 0.0)
+        x = x - step
+    return x
 
 
 @triton.jit

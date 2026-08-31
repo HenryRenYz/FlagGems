@@ -317,6 +317,7 @@ def test_adapted_libtuner_switches_default_expanded_and_cost_model(monkeypatch):
         _flagtune_default_strategy = "default_strategy"
         _flagtune_mode = flagtune_runtime_mod.TuningMode.DEFAULT
         _flagtune_warned = False
+        _flagtune_configs_for_mode = LibTuner._flagtune_configs_for_mode
 
         def _set_configs_and_strategy(self, configs, strategy, *, mode=None):
             self.configs = configs
@@ -377,6 +378,7 @@ def test_libtuner_falls_back_when_platform_package_is_missing(monkeypatch):
         _flagtune_default_strategy = "default_strategy"
         _flagtune_mode = flagtune_runtime_mod.TuningMode.COST_MODEL
         _flagtune_warned = False
+        _flagtune_configs_for_mode = LibTuner._flagtune_configs_for_mode
 
         def _set_configs_and_strategy(self, configs, strategy, *, mode=None):
             self.configs = configs
@@ -451,6 +453,7 @@ def test_official_triton_libtuner_uses_unadapted_routes(
         _flagtune_mode = flagtune_runtime_mod.TuningMode.DEFAULT
         _flagtune_warned = False
         configs = default_configs
+        _flagtune_configs_for_mode = LibTuner._flagtune_configs_for_mode
 
         def _set_configs_and_strategy(self, configs, strategy, *, mode=None):
             self.configs = configs

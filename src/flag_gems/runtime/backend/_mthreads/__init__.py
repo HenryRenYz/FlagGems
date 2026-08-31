@@ -19,7 +19,6 @@ vendor_info = VendorDescriptor(
     device_name="musa",
     dispatch_key="PrivateUse1",
     device_query_cmd="mthreads-gmi",
-    dispatch_key="PrivateUse1",
     fp64_enabled=False,
     tle_enabled=True,
 )

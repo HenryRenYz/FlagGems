@@ -161,18 +161,33 @@ def _validate_benchmark_retries(benchmark_retries: int) -> int:
     return benchmark_retries
 
 
-_TENSOR_TYPES: Optional[Tuple[Any, Tuple[type, ...]]] = None
+class _Unset:
+    """Type of :data:`_UNSET`, the "not resolved yet" marker.
+
+    Every lazily resolved process-global below uses this one marker so that
+    ``None`` keeps its ordinary meaning of "resolved, and the answer is
+    nothing".
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid only
+        return "<unset>"
+
+
+_UNSET: Final[_Unset] = _Unset()
+
+_TENSOR_TYPES: Union[_Unset, Tuple[Any, Tuple[type, ...]]] = _UNSET
 
 
 def _resolve_tensor_types() -> Tuple[Any, Tuple[type, ...]]:
     """Resolve ``torch`` and the ``TensorDescriptor`` class once per process.
 
     Both lookups used to run inside :func:`_infer_tensor_dtypes`, which is on
-    the per-launch dispatch path; re-executing the two imports cost
-    approximately 8 us per Hygon kernel launch.
+    the per-launch dispatch path, so they are resolved once here instead.
     """
     global _TENSOR_TYPES
-    if _TENSOR_TYPES is None:
+    if _TENSOR_TYPES is _UNSET:
         try:
             import torch as torch_module
         except ImportError:
@@ -184,7 +199,10 @@ def _resolve_tensor_types() -> Tuple[Any, Tuple[type, ...]]:
         except ImportError:
             descriptor_types = ()
         _TENSOR_TYPES = (torch_module, descriptor_types)
-    return _TENSOR_TYPES
+    resolved = _TENSOR_TYPES
+    if isinstance(resolved, _Unset):
+        raise RuntimeError("tensor types were not resolved")
+    return resolved
 
 
 def _infer_tensor_dtypes(values: Iterable[Any]) -> Tuple[Any, ...]:
@@ -216,7 +234,7 @@ def _infer_tensor_dtypes(values: Iterable[Any]) -> Tuple[Any, ...]:
 def _descriptor_cache_key(
     arg: Any, descriptor_types: Optional[Tuple[type, ...]] = None
 ) -> Any:
-    """Return a hashable representation for a Triton tensor descriptor."""
+    """Return a hashable representation for a resolved tensor descriptor."""
     if descriptor_types is None:
         _, descriptor_types = _resolve_tensor_types()
     if not descriptor_types or not isinstance(arg, descriptor_types):
@@ -240,8 +258,8 @@ _DTYPE_STR_CACHE: Dict[Any, str] = {}
 def _dtype_strings(dtypes: Iterable[Any]) -> Tuple[str, ...]:
     """Stringify dtypes through a cache.
 
-    ``str(torch.bfloat16)`` is ~1us and runs once per tensor argument per
-    launch; dtype objects are singletons, so caching is exact.
+    ``str(dtype)`` runs once per tensor argument per launch; dtype objects are
+    process-wide singletons, so caching on the object is exact.
     """
     cache = _DTYPE_STR_CACHE
     names: List[str] = []
@@ -258,10 +276,14 @@ class _LaunchMeta(Mapping[str, Any]):
     """Lazy read-only view of one launch's arguments for ``grid`` callables.
 
     Materializing ``{**dict(zip(arg_names, args)), **kwargs, **constexprs}``
-    costs approximately 9 us per launch, while a typical grid callable reads
-    one or two names.
+    builds a dict of every kernel argument on every launch, while a typical
+    grid callable reads one or two names.
     Lookup order reproduces that merge: constexprs win over kwargs, which win
     over positional arguments.
+
+    This is a read-only :class:`~collections.abc.Mapping`, not a ``dict``: a
+    grid callable that mutates its argument, or calls ``copy()``/``update()``,
+    will raise.  Every in-tree grid callable only subscripts it.
     """
 
     __slots__ = ("_arg_index", "_args", "_kwargs", "_constexprs")
@@ -311,9 +333,7 @@ class _LaunchMeta(Mapping[str, Any]):
         return sum(1 for _ in self)
 
 
-_HYGON_TENSOR_SPEC: Union[bool, Callable[[Any], Any], None] = (
-    False  # ``False`` means "not resolved yet"
-)
+_HYGON_TENSOR_SPEC: Union[_Unset, Callable[[Any], Any], None] = _UNSET
 
 
 def _hygon_tensor_spec() -> Optional[Callable[[Any], Any]]:
@@ -321,11 +341,11 @@ def _hygon_tensor_spec() -> Optional[Callable[[Any], Any]]:
 
     Resolved once instead of per tensor argument per launch: the vendor test,
     the ``triton.backends.hcu.compiler`` import and the ``hasattr`` probe used
-    to run inside :meth:`LibEntry.key`.
+    to run inside the per-launch dispatch path.
     """
     global _HYGON_TENSOR_SPEC
-    if _HYGON_TENSOR_SPEC is False:
-        spec = None
+    if _HYGON_TENSOR_SPEC is _UNSET:
+        spec: Optional[Callable[[Any], Any]] = None
         if device.vendor_name == "hygon" and hasattr(triton.backends, "hcu"):
             try:
                 from triton.backends.hcu.compiler import HIPBackend
@@ -335,7 +355,10 @@ def _hygon_tensor_spec() -> Optional[Callable[[Any], Any]]:
             except ImportError:
                 spec = None
         _HYGON_TENSOR_SPEC = spec
-    return _HYGON_TENSOR_SPEC if callable(_HYGON_TENSOR_SPEC) else None
+    resolved = _HYGON_TENSOR_SPEC
+    if isinstance(resolved, _Unset):
+        raise RuntimeError("Hygon tensor specialization was not resolved")
+    return resolved if callable(resolved) else None
 
 
 def _make_spec_arg(divisibility: int) -> Callable[[Any], Tuple[Any, ...]]:
@@ -373,15 +396,6 @@ def _dns_arg(arg: Any) -> Any:
     if 2**63 <= arg and arg <= 2**64 - 1:
         return "u64"
     return "i64"
-
-
-def _compose_dispatch_key(
-    spec_key: Iterable[Any],
-    dns_key: Iterable[Any],
-    const_args: Iterable[Any],
-) -> Tuple[Any, ...]:
-    """Compose dispatch-key parts in the order expected by Triton."""
-    return (*spec_key, *dns_key, *const_args)
 
 
 class Cache(object):
@@ -754,14 +768,12 @@ class LibTuner(triton.runtime.Autotuner):
         )
         self.cache = libcache[self.config_table_name]
 
-    _supports_cost_model: Optional[bool] = None
-
     def apply_flagtune(self):
-        supports_cost_model = getattr(self, "_supports_cost_model", None)
-        if supports_cost_model is None:
-            supports_cost_model = self._supports_cost_model = (
-                _supports_flagtune_cost_model(self)
-            )
+        # Not memoized: this is three `getattr` calls over decoration-time
+        # attributes, and caching it on the instance forced both a defensive
+        # `getattr` default here and a second, uncached spelling of the same
+        # question in `flagtune_policy`.
+        supports_cost_model = _supports_flagtune_cost_model(self)
         if self._flagtune_op_name is None and not supports_cost_model:
             return False
 
@@ -1307,6 +1319,37 @@ _FLAGTUNE_AVAILABILITY: Optional[Tuple[bool, Optional[BaseException]]] = None
 _FLAGTUNE_MISSING_BUNDLE_WARNED: Set[str] = set()
 
 
+class _NoModelBundleMissingError(Exception):
+    """Never raised; stands in for a FlagTree that predates the real class."""
+
+
+_MODEL_BUNDLE_MISSING_ERROR: Union[_Unset, Type[BaseException]] = _UNSET
+
+
+def _model_bundle_missing_error() -> Type[BaseException]:
+    """Return the exception class signalling "no bundle for this identity".
+
+    ``ModelBundleMissingError`` only exists in newer FlagTree releases, and the
+    optional package is resolved at runtime rather than pinned, so importing it
+    unguarded would turn an older-but-working FlagTree into an ``ImportError``
+    on every Cost Model tuning call.  Older releases instead get a class that is
+    never raised, which leaves every failure on the pre-existing "propagate
+    unchanged" path.
+    """
+    global _MODEL_BUNDLE_MISSING_ERROR
+    if _MODEL_BUNDLE_MISSING_ERROR is _UNSET:
+        try:
+            from triton.flagtune.runtime.model_loader import ModelBundleMissingError
+        except ImportError:
+            _MODEL_BUNDLE_MISSING_ERROR = _NoModelBundleMissingError
+        else:
+            _MODEL_BUNDLE_MISSING_ERROR = ModelBundleMissingError
+    resolved = _MODEL_BUNDLE_MISSING_ERROR
+    if isinstance(resolved, _Unset):
+        raise RuntimeError("model bundle exception was not resolved")
+    return resolved
+
+
 def _flagtune_available() -> Tuple[bool, Optional[BaseException]]:
     global _FLAGTUNE_AVAILABILITY
     if _FLAGTUNE_AVAILABILITY is None:
@@ -1528,11 +1571,11 @@ def flagtune_policy(
     )
     identity = model_identity.artifact_key
 
-    from triton.flagtune.runtime.model_loader import ModelBundleMissingError
+    bundle_missing_error = _model_bundle_missing_error()
 
     try:
         proposer, variant_info = _ensure_flagtune_proposer(model_identity)
-    except ModelBundleMissingError as exc:
+    except bundle_missing_error as exc:
         # A platform package covers only the identities it was built for, so a
         # missing bundle means this operator is unadapted for these dtypes rather
         # than that anything is broken. Packaging faults stay loud: the
@@ -1819,6 +1862,14 @@ class LibEntry(triton.KernelInterface):
         self._do_not_specialize_set = frozenset(self.do_not_specialize_indices)
         self._jit_params = tuple(self.jit_function.params)
         self._keep_const_in_kargs = major_version == 3 and 3 <= minor_version <= 6
+        # `k_args` is keyed by `_param_names` for positional arguments and by
+        # `_jit_params[i].name` for the rest, so its insertion order only equals
+        # signature order when the two agree.  Checked once here instead of
+        # assumed: if they ever diverge, the `k_args`-covers-everything fast
+        # path in `run` would pass silently reordered arguments to the kernel.
+        self._param_order_matches_jit = (
+            tuple(p.name for p in self._jit_params) == self._param_names
+        )
         self._flagtune_stages: Tuple[Any, ...] = self._collect_flagtune_stages()
         # Resolved on first use: importing the vendor backend at decoration
         # time would run before the Triton driver is necessarily active.
@@ -1871,21 +1922,29 @@ class LibEntry(triton.KernelInterface):
         dns_args: Iterable[Any],
         const_args: Iterable[Any],
     ) -> Tuple[Any, ...]:
-        """Build a dispatch key from raw specialization arguments."""
+        """Build a dispatch key from three pre-partitioned argument lists.
+
+        `run` does not call this: it classifies and transforms each argument in
+        a single pass instead of walking the partitioned lists a second time.
+        Both spellings end in the same literal ``(*spec, *dns, *const)``, and
+        both take their per-argument transforms from the same module-level
+        helpers, so the only thing that could drift is the concatenation order
+        -- which this method's tests pin down.
+        """
         spec_arg = self._spec_arg
         if spec_arg is None:
             spec_arg = self._spec_arg = _make_spec_arg(self.divisibility)
         _, descriptor_types = _resolve_tensor_types()
-        return _compose_dispatch_key(
-            (
+        return (
+            *(
                 spec_arg(_descriptor_cache_key(arg, descriptor_types))
                 for arg in spec_args
             ),
-            (
+            *(
                 _dns_arg(_descriptor_cache_key(arg, descriptor_types))
                 for arg in dns_args
             ),
-            (_descriptor_cache_key(arg, descriptor_types) for arg in const_args),
+            *(_descriptor_cache_key(arg, descriptor_types) for arg in const_args),
         )
 
     def run(self, *args, **kwargs):
@@ -1951,7 +2010,9 @@ class LibEntry(triton.KernelInterface):
                 + _dtype_strings(_infer_tensor_dtypes(dtype_values or ()))
             )
 
-        entry_key = _compose_dispatch_key(spec_key, dns_key, const_args)
+        # Same concatenation order as `key()`, spelled inline: this is the
+        # per-launch dispatch path, and the parts are already built.
+        entry_key = (*spec_key, *dns_key, *const_args)
         device = torch_device_fn.current_device()
         # CPU has one device per process and `current_device()` returns the
         # string "cpu" (can't index into the int-keyed `kernel_cache` tuple).
@@ -2048,7 +2109,7 @@ class LibEntry(triton.KernelInterface):
         if keep_const_in_kargs:
             # `k_args` is filled in signature order, so when it covers every
             # parameter its values already are the launch argument list.
-            if len(k_args) == len(param_names):
+            if self._param_order_matches_jit and len(k_args) == len(param_names):
                 all_args = list(k_args.values())
             else:
                 all_args = []

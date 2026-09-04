@@ -692,14 +692,20 @@ def test_threadsafety():
             run_two_threads()
 
 
-def test_descriptor_cache_key_uses_resolved_type(monkeypatch):
-    """Only resolved Triton descriptor types use the structural cache key."""
+DESCRIPTOR_KEY = ("TensorDescriptor", (2, 3), (3, 1), (1, 3), "zero")
 
-    class ResolvedDescriptor:
-        shape = (2, 3)
-        strides = (3, 1)
-        block_shape = (1, 3)
-        padding = "zero"
+
+class ResolvedDescriptor:
+    """Stands in for the descriptor class resolved from the active Triton."""
+
+    shape = (2, 3)
+    strides = (3, 1)
+    block_shape = (1, 3)
+    padding = "zero"
+
+
+def test_descriptor_cache_key_uses_resolved_type(monkeypatch):
+    """Resolved Triton descriptor types use the structural cache key."""
 
     class TensorDescriptor:
         shape = (9,)
@@ -713,34 +719,59 @@ def test_descriptor_cache_key_uses_resolved_type(monkeypatch):
     resolved = ResolvedDescriptor()
     same_name = TensorDescriptor()
 
-    assert libentry_mod._descriptor_cache_key(resolved) == (
-        "TensorDescriptor",
-        (2, 3),
-        (3, 1),
-        (1, 3),
-        "zero",
-    )
+    assert libentry_mod._descriptor_cache_key(resolved) == DESCRIPTOR_KEY
     assert libentry_mod._descriptor_cache_key(same_name) is same_name
 
 
-def test_dispatch_key_composition_order():
-    """Keep dispatch-key parts ordered as specialization, DNS, then constexpr."""
-    assert libentry_mod._compose_dispatch_key(
-        (("spec", 1),),
-        (("dns", 2),),
-        ("const", 3),
-    ) == (("spec", 1), ("dns", 2), "const", 3)
+def test_hygon_tensor_spec_distinguishes_unresolved_from_absent(monkeypatch):
+    """Resolve the hygon hook once, and cache "there is none" as an answer."""
+    probes = []
+
+    class CountingDevice:
+        @property
+        def vendor_name(self):
+            probes.append(1)
+            return "nvidia"
+
+    monkeypatch.setattr(libentry_mod, "_HYGON_TENSOR_SPEC", libentry_mod._UNSET)
+    monkeypatch.setattr(libentry_mod, "device", CountingDevice())
+
+    assert libentry_mod._hygon_tensor_spec() is None
+    # `None` is a resolved answer, not the "unresolved" marker, so the vendor
+    # probe must not run again on the next launch.
+    assert libentry_mod._HYGON_TENSOR_SPEC is None
+    assert libentry_mod._hygon_tensor_spec() is None
+    assert len(probes) == 1
+
+
+def test_make_spec_arg_without_vendor_hook(monkeypatch):
+    """Tensor-like arguments key on dtype and pointer alignment."""
+    monkeypatch.setattr(libentry_mod, "_hygon_tensor_spec", lambda: None)
+    spec_arg = libentry_mod._make_spec_arg(16)
+
+    aligned = SimpleNamespace(dtype="f32", data_ptr=lambda: 32)
+    misaligned = SimpleNamespace(dtype="f32", data_ptr=lambda: 33)
+
+    assert spec_arg(aligned) == ("f32", True)
+    assert spec_arg(misaligned) == ("f32", False)
+    assert spec_arg(7) == (int, 7)
+
+
+def test_make_spec_arg_with_vendor_hook(monkeypatch):
+    """A resolved vendor hook adds a third component for tensor arguments."""
+    monkeypatch.setattr(libentry_mod, "_hygon_tensor_spec", lambda: lambda arg: "hcu")
+    spec_arg = libentry_mod._make_spec_arg(16)
+
+    assert spec_arg(SimpleNamespace(dtype="f32", data_ptr=lambda: 32)) == (
+        "f32",
+        True,
+        "hcu",
+    )
+    assert spec_arg(7) == (int, 7)
 
 
 def test_libentry_key_normalizes_descriptor_arguments(monkeypatch):
     """Normalize descriptors before composing the public LibEntry key."""
-
-    class ResolvedDescriptor:
-        shape = (2, 3)
-        strides = (3, 1)
-        block_shape = (1, 3)
-        padding = "zero"
-
     monkeypatch.setattr(
         libentry_mod,
         "_resolve_tensor_types",
@@ -748,13 +779,6 @@ def test_libentry_key_normalizes_descriptor_arguments(monkeypatch):
     )
 
     descriptor = ResolvedDescriptor()
-    descriptor_key = (
-        "TensorDescriptor",
-        (2, 3),
-        (3, 1),
-        (1, 3),
-        "zero",
-    )
     entry = SimpleNamespace(
         _spec_arg=lambda value: ("spec", value),
         divisibility=16,
@@ -765,7 +789,40 @@ def test_libentry_key_normalizes_descriptor_arguments(monkeypatch):
         (descriptor,),
         (7,),
         (descriptor,),
-    ) == (("spec", descriptor_key), "i32", descriptor_key)
+    ) == (("spec", DESCRIPTOR_KEY), "i32", DESCRIPTOR_KEY)
+
+
+def test_libentry_key_orders_specialization_then_dns_then_constexpr():
+    """Pin the concatenation order `run` reproduces inline on the hot path."""
+    entry = SimpleNamespace(
+        _spec_arg=lambda value: ("spec", value),
+        divisibility=16,
+    )
+
+    assert libentry_mod.LibEntry.key(entry, ("a",), (7,), ("const", 3)) == (
+        ("spec", "a"),
+        "i32",
+        "const",
+        3,
+    )
+
+
+def test_dns_arg_buckets_integers_by_triton_width(monkeypatch):
+    """Reproduce Triton's integer bucketing for do-not-specialize arguments."""
+    monkeypatch.setattr(
+        libentry_mod,
+        "_resolve_tensor_types",
+        lambda: (None, (ResolvedDescriptor,)),
+    )
+
+    assert libentry_mod._dns_arg(0) == "i32"
+    assert libentry_mod._dns_arg(2**31 - 1) == "i32"
+    assert libentry_mod._dns_arg(2**31) == "i64"
+    assert libentry_mod._dns_arg(2**63) == "u64"
+    assert libentry_mod._dns_arg(SimpleNamespace(dtype="f16", data_ptr=lambda: 0)) == (
+        "f16"
+    )
+    assert libentry_mod._dns_arg("text") is str
 
 
 def test_hash_generation():

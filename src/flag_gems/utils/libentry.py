@@ -1907,9 +1907,7 @@ class LibEntry(triton.KernelInterface):
         specialize_set = self._specialize_set
         do_not_specialize_set = self._do_not_specialize_set
         keep_const_in_kargs = self._keep_const_in_kargs
-        dtype_values: Optional[List[Any]] = (
-            [] if self._has_flagtune_tuner else None
-        )
+        dtype_values: Optional[List[Any]] = [] if self._has_flagtune_tuner else None
         for i, arg in enumerate(args):
             if dtype_values is not None:
                 dtype_values.append(arg)

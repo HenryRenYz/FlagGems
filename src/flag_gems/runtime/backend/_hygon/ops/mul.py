@@ -291,9 +291,11 @@ def mul_complex_generic_nd_kernel(
         out_r_offsets += idx * OUT_R_STRIDE[dim]
         out_i_offsets += idx * OUT_I_STRIDE[dim]
 
-    # complex32 下 ar*br - ai*bi 是交叉项相减，fp16 中间精度会产生抵消误差
-    # （实测 complex32 大 shape 上有个别元素超出 1e-3 相对容差）。提升到 fp32
-    # 计算，tl.store 时自动转回输出 dtype，只影响中间精度不改变结果类型。
+    # For complex32, ar*br - ai*bi subtracts cross terms, so fp16 intermediate
+    # precision can cause cancellation error. Empirically, a few elements in
+    # large complex32 shapes exceeded the 1e-3 relative tolerance. Compute in
+    # fp32 and let tl.store cast back to the output dtype; only intermediate
+    # precision changes.
     ar = tl.load(ar_ptr + ar_offsets, mask=mask, other=0.0).to(tl.float32)
     ai = tl.load(ai_ptr + ai_offsets, mask=mask, other=0.0).to(tl.float32)
     br = tl.load(br_ptr + br_offsets, mask=mask, other=0.0).to(tl.float32)
@@ -356,9 +358,11 @@ def mul_complex_generic_nd_runtime_meta_kernel(
         out_r_offsets += idx * out_r_stride_dim
         out_i_offsets += idx * out_i_stride_dim
 
-    # complex32 下 ar*br - ai*bi 是交叉项相减，fp16 中间精度会产生抵消误差
-    # （实测 complex32 大 shape 上有个别元素超出 1e-3 相对容差）。提升到 fp32
-    # 计算，tl.store 时自动转回输出 dtype，只影响中间精度不改变结果类型。
+    # For complex32, ar*br - ai*bi subtracts cross terms, so fp16 intermediate
+    # precision can cause cancellation error. Empirically, a few elements in
+    # large complex32 shapes exceeded the 1e-3 relative tolerance. Compute in
+    # fp32 and let tl.store cast back to the output dtype; only intermediate
+    # precision changes.
     ar = tl.load(ar_ptr + ar_offsets, mask=mask, other=0.0).to(tl.float32)
     ai = tl.load(ai_ptr + ai_offsets, mask=mask, other=0.0).to(tl.float32)
     br = tl.load(br_ptr + br_offsets, mask=mask, other=0.0).to(tl.float32)

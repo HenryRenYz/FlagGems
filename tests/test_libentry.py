@@ -692,6 +692,82 @@ def test_threadsafety():
             run_two_threads()
 
 
+def test_descriptor_cache_key_uses_resolved_type(monkeypatch):
+    """Only resolved Triton descriptor types use the structural cache key."""
+
+    class ResolvedDescriptor:
+        shape = (2, 3)
+        strides = (3, 1)
+        block_shape = (1, 3)
+        padding = "zero"
+
+    class TensorDescriptor:
+        shape = (9,)
+
+    monkeypatch.setattr(
+        libentry_mod,
+        "_resolve_tensor_types",
+        lambda: (None, (ResolvedDescriptor,)),
+    )
+
+    resolved = ResolvedDescriptor()
+    same_name = TensorDescriptor()
+
+    assert libentry_mod._descriptor_cache_key(resolved) == (
+        "TensorDescriptor",
+        (2, 3),
+        (3, 1),
+        (1, 3),
+        "zero",
+    )
+    assert libentry_mod._descriptor_cache_key(same_name) is same_name
+
+
+def test_dispatch_key_composition_order():
+    """Keep dispatch-key parts ordered as specialization, DNS, then constexpr."""
+    assert libentry_mod._compose_dispatch_key(
+        (("spec", 1),),
+        (("dns", 2),),
+        ("const", 3),
+    ) == (("spec", 1), ("dns", 2), "const", 3)
+
+
+def test_libentry_key_normalizes_descriptor_arguments(monkeypatch):
+    """Normalize descriptors before composing the public LibEntry key."""
+
+    class ResolvedDescriptor:
+        shape = (2, 3)
+        strides = (3, 1)
+        block_shape = (1, 3)
+        padding = "zero"
+
+    monkeypatch.setattr(
+        libentry_mod,
+        "_resolve_tensor_types",
+        lambda: (None, (ResolvedDescriptor,)),
+    )
+
+    descriptor = ResolvedDescriptor()
+    descriptor_key = (
+        "TensorDescriptor",
+        (2, 3),
+        (3, 1),
+        (1, 3),
+        "zero",
+    )
+    entry = SimpleNamespace(
+        _spec_arg=lambda value: ("spec", value),
+        divisibility=16,
+    )
+
+    assert libentry_mod.LibEntry.key(
+        entry,
+        (descriptor,),
+        (7,),
+        (descriptor,),
+    ) == (("spec", descriptor_key), "i32", descriptor_key)
+
+
 def test_hash_generation():
     @libtuner(
         configs=[
@@ -1540,7 +1616,17 @@ def test_adapted_config_cache_namespace_separates_tuning_modes():
     )
 
 
-def test_benchmark_config_reuses_kernel_context_and_bypasses_caches(monkeypatch):
+@pytest.mark.parametrize(
+    ("benchmark_result", "expected_result"),
+    [
+        ([1.0, 0.8, 1.2], [1.0, 0.8, 1.2]),
+        (1.0, [1.0, 1.0, 1.0]),
+        (1, [1, 1, 1]),
+    ],
+)
+def test_benchmark_config_reuses_kernel_context_and_bypasses_caches(
+    monkeypatch, benchmark_result, expected_result
+):
     """Benchmark one fixed config with explicit durations and no policy/cache call."""
     config = triton.Config({"BLOCK": 16})
     observed = {}
@@ -1565,7 +1651,7 @@ def test_benchmark_config_reuses_kernel_context_and_bypasses_caches(monkeypatch)
         def benchmark(kernel_call, quantiles):
             observed["quantiles"] = quantiles
             observed["launch"] = kernel_call()
-            return [1.0, 0.8, 1.2]
+            return benchmark_result
 
         return SimpleNamespace(protocol=protocol, benchmark=benchmark)
 
@@ -1623,7 +1709,7 @@ def test_benchmark_config_reuses_kernel_context_and_bypasses_caches(monkeypatch)
         quantiles=(0.2, 0.5, 0.8),
     )
 
-    assert result == [1.0, 0.8, 1.2]
+    assert result == expected_result
     assert observed == {
         "args": ("descriptor",),
         "config": config,

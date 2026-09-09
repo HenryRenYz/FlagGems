@@ -770,29 +770,6 @@ def _get_tma_transposed_direct_tuned_configs():
 
 
 class _TmaTransposedStableTuner(LibTuner):
-    @staticmethod
-    def _select_stable(timings):
-        def p50(values):
-            if isinstance(values, (tuple, list)):
-                return float(values[0])
-            return float(values)
-
-        p50_by_config = {config: p50(values) for config, values in timings.items()}
-        fastest = min(p50_by_config.values())
-        near_ties = [
-            config
-            for config in timings
-            if p50_by_config[config] <= fastest * 1.005
-        ]
-        return max(
-            near_ties,
-            key=lambda config: (
-                config.kwargs["BLOCK_M"] * config.kwargs["BLOCK_N"],
-                config.kwargs["BLOCK_M"],
-                -p50_by_config[config],
-            ),
-        )
-
     def policy(self, bench_fn, configs, args, kwargs):
         if (
             getattr(self, "_flagtune_mode", runtime.TuningMode.DEFAULT)
@@ -803,7 +780,21 @@ class _TmaTransposedStableTuner(LibTuner):
             )
         else:
             timings = {config: bench_fn(config) for config in configs}
-        return self._select_stable(timings), timings
+        p50 = {
+            config: float(values[0] if isinstance(values, (tuple, list)) else values)
+            for config, values in timings.items()
+        }
+        fastest = min(p50.values())
+        near_ties = [config for config in timings if p50[config] <= fastest * 1.005]
+        best_config = max(
+            near_ties,
+            key=lambda config: (
+                config.kwargs["BLOCK_M"] * config.kwargs["BLOCK_N"],
+                config.kwargs["BLOCK_M"],
+                -p50[config],
+            ),
+        )
+        return best_config, timings
 
 
 mm_kernel_tma_transposed_direct_tuned = libentry()(

@@ -118,11 +118,15 @@ def pretune_json_row(
         config_search["timings"] = _round_ms_fields(row["config_timings"])
     return {
         "schema_version": SCHEMA_VERSION,
+        "recipe_id": row.get("recipe_id"),
         "input_row_index": row.get("source_index"),
         "operator": {
             "id": row.get("op_id"),
             "name": row.get("op_name"),
             "variant": row.get("variant"),
+            "route_variant": row.get("route_variant"),
+            "tuning_variant": row.get("tuning_variant") or row.get("variant"),
+            "stage": row.get("stage"),
         },
         "workload": {
             "dimensions": _dimensions(row, shape_fields),
@@ -158,19 +162,34 @@ def pretune_json_row(
                 "p50": rounded_ms(row.get("latency_p50_ms")),
                 "p80": rounded_ms(row.get("latency_p80_ms")),
             },
+            "route": row.get("route"),
+            "route_drift": bool(row.get("route_drift", False)),
+            "latency_scope": row.get("latency_scope"),
         },
+        "model_inputs": row.get("model_inputs"),
         "config_search": config_search,
     }
 
 
-def pretune_csv_fieldnames(shape_fields: Sequence[str]) -> list[str]:
+def pretune_csv_fieldnames(
+    shape_fields: Sequence[str],
+    *,
+    include_recipe_id: bool = False,
+    include_route_metadata: bool = False,
+) -> list[str]:
     """Return the stable flat Pretune CSV Schema v3 header."""
-    return [
-        "schema_version",
+    fields = ["schema_version"]
+    if include_recipe_id:
+        fields.append("recipe_id")
+    fields.extend(
+        [
         "input_row_index",
         "op_id",
         "op_name",
         "variant",
+        "route_variant",
+        "tuning_variant",
+        "stage",
         *shape_fields,
         "Count",
         "input_dtypes",
@@ -185,6 +204,7 @@ def pretune_csv_fieldnames(shape_fields: Sequence[str]) -> list[str]:
         "first_call_ms",
         "tuning_time_ms",
         "latency_source",
+        "latency_scope",
         "benchmark_requested_mode",
         "benchmark_resolved_mode",
         "benchmark_implementation",
@@ -206,7 +226,11 @@ def pretune_csv_fieldnames(shape_fields: Sequence[str]) -> list[str]:
         "measured_count",
         "best_config",
         "error",
-    ]
+        ]
+    )
+    if include_route_metadata:
+        fields.extend(("route", "route_drift", "model_inputs"))
+    return fields
 
 
 def pretune_csv_row(
@@ -220,10 +244,14 @@ def pretune_csv_row(
         benchmark_protocol = {}
     return {
         "schema_version": SCHEMA_VERSION,
+        "recipe_id": row.get("recipe_id"),
         "input_row_index": row.get("source_index"),
         "op_id": row.get("op_id"),
         "op_name": row.get("op_name"),
         "variant": row.get("variant"),
+        "route_variant": row.get("route_variant"),
+        "tuning_variant": row.get("tuning_variant") or row.get("variant"),
+        "stage": row.get("stage"),
         **dimensions,
         "Count": row.get("Count"),
         "input_dtypes": row.get("input_dtypes"),
@@ -238,6 +266,7 @@ def pretune_csv_row(
         "first_call_ms": format_ms(row.get("first_call_ms")),
         "tuning_time_ms": format_ms(row.get("tuning_time_ms")),
         "latency_source": row.get("latency_source"),
+        "latency_scope": row.get("latency_scope"),
         "benchmark_requested_mode": benchmark_protocol.get("requested_mode"),
         "benchmark_resolved_mode": benchmark_protocol.get("resolved_mode"),
         "benchmark_implementation": benchmark_protocol.get("implementation"),
@@ -259,4 +288,7 @@ def pretune_csv_row(
         "measured_count": row.get("benchmark_success_count"),
         "best_config": row.get("best_config"),
         "error": row.get("error", ""),
+        "route": row.get("route"),
+        "route_drift": bool(row.get("route_drift", False)),
+        "model_inputs": row.get("model_inputs"),
     }

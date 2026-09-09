@@ -707,23 +707,25 @@ DESCRIPTOR_KEY = ("TensorDescriptor", (2, 3), (3, 1), (1, 3), "zero")
 class ResolvedDescriptor:
     """Stands in for the descriptor class resolved from the active Triton."""
 
+    __hash__ = None
     shape = (2, 3)
     strides = (3, 1)
     block_shape = (1, 3)
     padding = "zero"
 
 
-def test_descriptor_cache_key_uses_resolved_type(monkeypatch):
+@pytest.fixture
+def descriptor_module(monkeypatch):
+    module = SimpleNamespace(TensorDescriptor=ResolvedDescriptor)
+    monkeypatch.setitem(sys.modules, "triton.tools.tensor_descriptor", module)
+    return module
+
+
+def test_descriptor_cache_key_uses_resolved_type(descriptor_module):
     """Resolved Triton descriptor types use the structural cache key."""
 
     class TensorDescriptor:
         shape = (9,)
-
-    monkeypatch.setattr(
-        libentry_mod,
-        "_resolve_tensor_types",
-        lambda: (None, (ResolvedDescriptor,)),
-    )
 
     resolved = ResolvedDescriptor()
     same_name = TensorDescriptor()
@@ -732,106 +734,162 @@ def test_descriptor_cache_key_uses_resolved_type(monkeypatch):
     assert libentry_mod._descriptor_cache_key(same_name) is same_name
 
 
-def test_hygon_tensor_spec_distinguishes_unresolved_from_absent(monkeypatch):
-    """Resolve the hygon hook once, and cache "there is none" as an answer."""
-    probes = []
-
-    class CountingDevice:
-        @property
-        def vendor_name(self):
-            probes.append(1)
-            return "nvidia"
-
-    monkeypatch.setattr(libentry_mod, "_HYGON_TENSOR_SPEC", libentry_mod._UNSET)
-    monkeypatch.setattr(libentry_mod, "device", CountingDevice())
-
-    assert libentry_mod._hygon_tensor_spec() is None
-    # `None` is a resolved answer, not the "unresolved" marker, so the vendor
-    # probe must not run again on the next launch.
-    assert libentry_mod._HYGON_TENSOR_SPEC is None
-    assert libentry_mod._hygon_tensor_spec() is None
-    assert len(probes) == 1
+def test_descriptor_cache_key_without_descriptor_module(monkeypatch):
+    monkeypatch.setitem(sys.modules, "triton.tools.tensor_descriptor", None)
+    value = object()
+    assert libentry_mod._descriptor_cache_key(value) is value
 
 
-def test_make_spec_arg_without_vendor_hook(monkeypatch):
+@pytest.mark.parametrize("has_error_class", [False, True])
+def test_model_bundle_missing_error_supports_older_flagtree(
+    monkeypatch, has_error_class
+):
+    class MissingBundleError(Exception):
+        pass
+
+    loader = SimpleNamespace()
+    if has_error_class:
+        loader.ModelBundleMissingError = MissingBundleError
+    monkeypatch.setitem(sys.modules, "triton.flagtune.runtime.model_loader", loader)
+    expected = (
+        MissingBundleError
+        if has_error_class
+        else libentry_mod._NoModelBundleMissingError
+    )
+    assert libentry_mod._model_bundle_missing_error() is expected
+
+
+def test_libentry_key_without_vendor_hook(monkeypatch):
     """Tensor-like arguments key on dtype and pointer alignment."""
-    monkeypatch.setattr(libentry_mod, "_hygon_tensor_spec", lambda: None)
-    spec_arg = libentry_mod._make_spec_arg(16)
+    monkeypatch.setattr(libentry_mod, "device", SimpleNamespace(vendor_name="nvidia"))
+    entry = SimpleNamespace(divisibility=16)
 
     aligned = SimpleNamespace(dtype="f32", data_ptr=lambda: 32)
     misaligned = SimpleNamespace(dtype="f32", data_ptr=lambda: 33)
 
-    assert spec_arg(aligned) == ("f32", True)
-    assert spec_arg(misaligned) == ("f32", False)
-    assert spec_arg(7) == (int, 7)
-
-
-def test_make_spec_arg_with_vendor_hook(monkeypatch):
-    """A resolved vendor hook adds a third component for tensor arguments."""
-    monkeypatch.setattr(libentry_mod, "_hygon_tensor_spec", lambda: lambda arg: "hcu")
-    spec_arg = libentry_mod._make_spec_arg(16)
-
-    assert spec_arg(SimpleNamespace(dtype="f32", data_ptr=lambda: 32)) == (
-        "f32",
-        True,
-        "hcu",
+    assert libentry_mod.LibEntry.key(entry, (aligned, misaligned, 7), (), ()) == (
+        ("f32", True),
+        ("f32", False),
+        (int, 7),
     )
-    assert spec_arg(7) == (int, 7)
 
 
-def test_libentry_key_normalizes_descriptor_arguments(monkeypatch):
+@pytest.mark.parametrize("backend_state", ["missing", "no_hook", "with_hook"])
+def test_libentry_key_with_hygon_backend(monkeypatch, backend_state):
+    """Preserve optional Hygon tensor specialization without a helper cache."""
+    backend = SimpleNamespace()
+    if backend_state == "with_hook":
+        backend.get_tensor_specialization = lambda arg: "hcu"
+    monkeypatch.setattr(libentry_mod, "device", SimpleNamespace(vendor_name="hygon"))
+    monkeypatch.setattr(triton.backends, "hcu", SimpleNamespace(), raising=False)
+    monkeypatch.setitem(
+        sys.modules,
+        "triton.backends.hcu.compiler",
+        None if backend_state == "missing" else SimpleNamespace(HIPBackend=backend),
+    )
+    entry = SimpleNamespace(divisibility=16)
+    tensor = SimpleNamespace(dtype="f32", data_ptr=lambda: 32)
+    tensor_key = ("f32", True, "hcu") if backend_state == "with_hook" else ("f32", True)
+
+    assert libentry_mod.LibEntry.key(entry, (tensor, 7), (), ()) == (
+        tensor_key,
+        (int, 7),
+    )
+
+
+def test_libentry_key_normalizes_descriptor_arguments(descriptor_module):
     """Normalize descriptors before composing the public LibEntry key."""
-    monkeypatch.setattr(
-        libentry_mod,
-        "_resolve_tensor_types",
-        lambda: (None, (ResolvedDescriptor,)),
-    )
-
     descriptor = ResolvedDescriptor()
-    entry = SimpleNamespace(
-        _spec_arg=lambda value: ("spec", value),
-        divisibility=16,
-    )
+    entry = SimpleNamespace(divisibility=16)
 
-    assert libentry_mod.LibEntry.key(
+    key = libentry_mod.LibEntry.key(
         entry,
         (descriptor,),
-        (7,),
+        (descriptor, 7),
         (descriptor,),
-    ) == (("spec", DESCRIPTOR_KEY), "i32", DESCRIPTOR_KEY)
+    )
+    assert key == ((tuple, DESCRIPTOR_KEY), tuple, "i32", DESCRIPTOR_KEY)
+    hash(key)
+
+
+@pytest.mark.parametrize("keyword_first", [False, True])
+def test_libentry_run_normalizes_keyword_descriptors(
+    monkeypatch, descriptor_module, keyword_first
+):
+    """Both calling styles share a cache key and pass real descriptors on launch."""
+
+    @triton.jit
+    def kernel(a_desc):
+        pass
+
+    entry = libentry_mod.LibEntry(kernel)
+    entry._has_flagtune_tuner = True
+    monkeypatch.setattr(entry, "_apply_flagtune", lambda: None)
+    monkeypatch.setattr(libentry_mod.torch_device_fn, "current_device", lambda: "cpu")
+    launches = []
+    compiled_calls = []
+
+    class FakeCompiledKernel:
+        def __getitem__(self, grid):
+            return lambda *args: launches.append((grid, args))
+
+    compiled = FakeCompiledKernel()
+
+    def fake_run(*args, **kwargs):
+        compiled_calls.append((args, kwargs))
+        return compiled
+
+    monkeypatch.setattr(kernel, "run", fake_run)
+    descriptor = ResolvedDescriptor()
+    descriptor.base = torch.empty(1, dtype=torch.bfloat16, device="cpu")
+    for keyword in (keyword_first, not keyword_first):
+        if keyword:
+            entry.run(a_desc=descriptor, grid=(1,))
+        else:
+            entry.run(descriptor, grid=(1,))
+    assert len(compiled_calls) == 1
+    assert launches == [((1, 1, 1), (descriptor,))]
+    assert len(entry._cpu_cache) == 1
+    assert next(iter(entry._cpu_cache))[-1] == (
+        "flagtune_dtypes",
+        "torch.bfloat16",
+    )
+
+    # Equal descriptor layouts with different input dtypes must not reuse the
+    # compiled kernel, including when the descriptor is passed by keyword.
+    descriptor_fp32 = ResolvedDescriptor()
+    descriptor_fp32.base = torch.empty(1, dtype=torch.float32, device="cpu")
+    entry.run(a_desc=descriptor_fp32, grid=(1,))
+    assert len(compiled_calls) == 2
+    assert len(entry._cpu_cache) == 2
 
 
 def test_libentry_key_orders_specialization_then_dns_then_constexpr():
-    """Pin the concatenation order `run` reproduces inline on the hot path."""
-    entry = SimpleNamespace(
-        _spec_arg=lambda value: ("spec", value),
-        divisibility=16,
-    )
+    """Pin the specialization, non-specialization and constexpr key order."""
+    entry = SimpleNamespace(divisibility=16)
 
     assert libentry_mod.LibEntry.key(entry, ("a",), (7,), ("const", 3)) == (
-        ("spec", "a"),
+        (str, "a"),
         "i32",
         "const",
         3,
     )
 
 
-def test_dns_arg_buckets_integers_by_triton_width(monkeypatch):
+def test_libentry_key_buckets_integers_by_triton_width():
     """Reproduce Triton's integer bucketing for do-not-specialize arguments."""
-    monkeypatch.setattr(
-        libentry_mod,
-        "_resolve_tensor_types",
-        lambda: (None, (ResolvedDescriptor,)),
+    entry = SimpleNamespace(divisibility=16)
+    tensor = SimpleNamespace(dtype="f16", data_ptr=lambda: 0)
+    assert libentry_mod.LibEntry.key(
+        entry, (), (0, 2**31 - 1, 2**31, 2**63, tensor, "text"), ()
+    ) == (
+        "i32",
+        "i32",
+        "i64",
+        "u64",
+        "f16",
+        str,
     )
-
-    assert libentry_mod._dns_arg(0) == "i32"
-    assert libentry_mod._dns_arg(2**31 - 1) == "i32"
-    assert libentry_mod._dns_arg(2**31) == "i64"
-    assert libentry_mod._dns_arg(2**63) == "u64"
-    assert libentry_mod._dns_arg(SimpleNamespace(dtype="f16", data_ptr=lambda: 0)) == (
-        "f16"
-    )
-    assert libentry_mod._dns_arg("text") is str
 
 
 def test_hash_generation():

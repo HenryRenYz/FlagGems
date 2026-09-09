@@ -24,7 +24,6 @@ import flag_gems
 from . import accuracy_utils as utils
 from .conftest import QUICK_MODE
 
-
 if QUICK_MODE:
     MNK_SHAPES = [
         (1, 1, 32),

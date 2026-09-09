@@ -973,6 +973,7 @@ class LibTuner(triton.runtime.Autotuner):
                     config=config,
                     **benchmark_meta,
                 )
+                # Normalize scalar float to 3-element tuple for consistency
                 if isinstance(bench_ret, (int, float)):
                     bench_ret = (bench_ret, bench_ret, bench_ret)
                 return list(bench_ret)

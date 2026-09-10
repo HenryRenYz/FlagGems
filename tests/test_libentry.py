@@ -2166,18 +2166,37 @@ def test_hopper_mm_config_compiles_without_runtime_registration():
         os.path.join(
             os.path.dirname(operator_config_mod.__file__),
             "configs",
-            "mm_flagtune_configs.yaml",
+            "mm_hopper_flagtune_configs.yaml",
         )
     )
     operator = spec.operator_info
     expected = {
         "general_tma": ({"M": 4096, "N": 4096, "K": 4096}, 3360, 54),
-        "gemv": ({"M": 1024, "N": 1, "K": 4096}, 168, 46),
-        "splitk": ({"M": 1024, "N": 1024, "K": 4096}, 672, 53),
+        "gemv": ({"M": 1024, "N": 1, "K": 4096}, 224, 46),
+        "splitk_two_step": ({"M": 1024, "N": 1024, "K": 4096}, 48, 53),
+        "splitk": ({"M": 1024, "N": 1024, "K": 4096}, 576, 53),
+        "tma_transposed_direct": (
+            {"M": 64, "N": 128, "K": 1536},
+            384,
+            47,
+        ),
     }
-    assert set(operator.variants) == set(expected)
-    assert spec.dispatch_order == ("gemv", "splitk", "general_tma")
-    assert spec.shape.identity == ("B", "M", "N", "K")
+    public_variants = {
+        name
+        for name, info in operator.variants.items()
+        if getattr(info, "stage", "public") != "partial"
+    }
+    assert public_variants == set(expected)
+    assert "splitk_two_step_partial" in operator.variants
+    assert operator.get_variant("splitk_two_step_partial").stage == "partial"
+    assert spec.dispatch_order == (
+        "gemv",
+        "splitk_two_step",
+        "splitk",
+        "general_tma",
+        "tma_transposed_direct",
+    )
+    assert spec.shape.identity == ("B", "M", "N", "K", "B_layout")
 
     for name, (shape, config_count, feature_count) in expected.items():
         variant = operator.get_variant(name)
@@ -2192,7 +2211,9 @@ def test_hopper_mm_config_compiles_without_runtime_registration():
     bound_kernel_names = {
         "general_tma": "mm_kernel_general_host_tma",
         "gemv": "gemv_kernel",
-        "splitk": "mm_kernel_splitk",
+        "splitk_two_step_partial": "_mm_kernel_splitk",
+        "splitk": "_mm_kernel_splitk",
+        "tma_transposed_direct": "mm_kernel_tma_transposed_direct",
     }
     for variant_name, expected_kernel_name in bound_kernel_names.items():
         _, resolved_tuner = libentry_mod.find_flagtune_benchmark_target(
@@ -2211,6 +2232,42 @@ def test_hopper_mm_config_compiles_without_runtime_registration():
         mm_ops.mm_kernel_splitk.fn._flagtune_op_id,
         mm_ops.mm_kernel_splitk.fn._flagtune_variant,
     ) == ("flaggems/mm", "splitk")
+    assert (
+        mm_ops.mm_kernel_splitk_partials.fn._flagtune_op_id,
+        mm_ops.mm_kernel_splitk_partials.fn._flagtune_variant,
+    ) == ("flaggems/mm", "splitk_two_step_partial")
+    assert (
+        mm_ops.mm_kernel_tma_transposed_direct_tuned.fn._flagtune_op_id,
+        mm_ops.mm_kernel_tma_transposed_direct_tuned.fn._flagtune_variant,
+    ) == ("flaggems/mm", "tma_transposed_direct")
+
+    direct_variant = operator.get_variant("tma_transposed_direct")
+    from flag_gems import runtime
+
+    runtime_configs = runtime.ops_get_configs(
+        "mm_tma_transposed_direct",
+        yaml_path=mm_ops.EXPAND_CONFIG_FILENAME,
+        pre_hook=None,
+    )
+    assert len(runtime_configs) == 55
+
+    two_step_variant = operator.get_variant("splitk_two_step")
+    two_step_configs = [
+        two_step_variant.to_config(config)
+        for config in two_step_variant.iter_configs()
+    ]
+    small_n_configs = mm_ops._prune_mm_splitk_two_step_configs(
+        two_step_configs,
+        {"N": 32},
+    )
+    large_n_configs = mm_ops._prune_mm_splitk_two_step_configs(
+        two_step_configs,
+        {"N": 64},
+    )
+    assert len(small_n_configs) == 24
+    assert {config.kwargs["BLOCK_N"] for config in small_n_configs} == {16, 32}
+    assert len(large_n_configs) == 24
+    assert {config.kwargs["BLOCK_N"] for config in large_n_configs} == {64, 128}
 
 
 @pytest.mark.skipif(

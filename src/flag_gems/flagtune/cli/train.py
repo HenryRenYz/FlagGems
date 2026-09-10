@@ -71,6 +71,7 @@ from flag_gems.flagtune.cli.pretune import (  # noqa: E402
     load_shape_records,
     parse_max_shapes,
     parse_sort,
+    planner_benchmark_shape,
     sanitize_db_url,
     select_shape_records,
     visible_device_tokens,
@@ -428,7 +429,7 @@ def _collection_group_key(
     platform_key: Optional[str],
 ) -> str:
     """Build the final ranker group identity before collection batching."""
-    payload = record.to_benchmark_shape()
+    payload = planner_benchmark_shape(record, spec, platform_key)
     values = payload.get("values") if isinstance(payload, Mapping) else None
     if not isinstance(values, Mapping):
         values = payload
@@ -800,6 +801,11 @@ def run_main(args: argparse.Namespace) -> int:
             requested_variant,
             sort_spec,
             args.max_shapes,
+            {
+                "platform_key": getattr(context, "vendor_name", "unknown"),
+                "dtypes": args.dtypes,
+                "planner_output": True,
+            },
         )
     except PretuneError as exc:
         raise TrainError(str(exc)) from exc
@@ -818,17 +824,16 @@ def run_main(args: argparse.Namespace) -> int:
         requested_variant,
         platform=getattr(context, "vendor_name", None),
     )
-    if runtime_configs is not None and not runtime_configs:
+    if runtime_configs is None:
+        raise TrainError(
+            f"{operation_id} has no runtime candidate resolver; "
+            "runtime YAML is authoritative"
+        )
+    if not runtime_configs:
         raise TrainError(
             f"{operation_id} runtime Expanded + Default config space is empty"
         )
-    # Preserve the existing contract domain for operators whose runtime mapping
-    # has not been migrated yet. MUL uses the runtime-owned candidate domain.
-    configs = (
-        list(variant_info.iter_configs())
-        if runtime_configs is None
-        else runtime_configs
-    )
+    configs = runtime_configs
     if not configs:
         raise TrainError(f"{operation_id} has an empty parameter space")
     runtime_candidate_hash = (
@@ -939,7 +944,11 @@ def run_main(args: argparse.Namespace) -> int:
                 batch = run_shape_config_benchmarks(
                     [
                         (
-                            record.to_benchmark_shape(),
+                            planner_benchmark_shape(
+                                record,
+                                spec,
+                                getattr(context, "vendor_name", None),
+                            ),
                             configs,
                         )
                         for record in records
@@ -1176,7 +1185,7 @@ def run_main(args: argparse.Namespace) -> int:
             "selected_shape_count": len(selected),
             "config_count_per_shape": len(configs),
             "config_source": plan["config_source"],
-            "contract_config_count": len(configs) if runtime_configs is None else None,
+            "contract_config_count": None,
             "runtime_config_count": (
                 len(runtime_configs) if runtime_configs is not None else None
             ),

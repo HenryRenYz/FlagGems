@@ -1,3 +1,17 @@
+# Copyright 2026 FlagOS Contributors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 # FlagTree model schema plus FlagGems Pretune execution schema for torch.mul.
 # The workload format matches FlagTune shape files:
 #   broadcast: [broadcast, lhs_shape, rhs_shape, optional Count]
@@ -79,14 +93,6 @@ variants:
       - {name: log2_grid_size, op: log2, args: [grid_size]}
       - {name: tail_elements, op: mod, args: [n_elements, BLOCK_SIZE]}
       - {name: block_to_cols, op: fdiv, args: [BLOCK_SIZE, n_cols]}
-      # Elements each thread handles. Winners cluster on this ratio far more
-      # tightly than on BLOCK_SIZE alone once conditioned on problem size:
-      # entropy 1.00 vs 1.95 bit for n_elements > 1e6, 1.74 vs 2.20 in the
-      # middle band. 47% of the 83 measured shapes want exactly 256.
-      - {name: elems_per_thread, op: fdiv, args: [BLOCK_SIZE, num_warps]}
-      # How much of the last block is wasted. The absolute tail_elements above
-      # only reached 2.2% gain because the useful quantity is the fraction.
-      - {name: tail_frac, op: fdiv, args: [tail_elements, BLOCK_SIZE]}
 
   scalar:
     inputs:
@@ -104,5 +110,3 @@ variants:
       - {name: grid_size, op: cdiv, args: [n_elements, BLOCK_SIZE]}
       - {name: log2_grid_size, op: log2, args: [grid_size]}
       - {name: tail_elements, op: mod, args: [n_elements, BLOCK_SIZE]}
-      - {name: elems_per_thread, op: fdiv, args: [BLOCK_SIZE, num_warps]}
-      - {name: tail_frac, op: fdiv, args: [tail_elements, BLOCK_SIZE]}

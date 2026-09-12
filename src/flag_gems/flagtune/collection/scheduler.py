@@ -335,10 +335,7 @@ def _run_worker(args: argparse.Namespace) -> int:
             f"device, got {environment.device_count}"
         )
     environment.runtime.set_device(0)
-    from flag_gems.flagtune.runtime.executor import (
-        BenchmarkWorker,
-        describe_benchmark_case,
-    )
+    from flag_gems.flagtune.runtime.executor import BenchmarkWorker, describe_benchmark_case
 
     worker = BenchmarkWorker(args.operator_config, environment.runtime)
     payload = json.loads(Path(args.task_file).read_text(encoding="utf-8"))

@@ -57,7 +57,10 @@ SCRIPT_PATH = (
 )
 BENCHMARK_PATH = SCRIPT_PATH.parents[1] / "collection" / "scheduler.py"
 CONFIG_PATH = (
-    SCRIPT_PATH.parents[1] / "contracts" / "configs" / "mm_flagtune_configs.yaml"
+    SCRIPT_PATH.parents[1]
+    / "contracts"
+    / "configs"
+    / "mm_hopper_flagtune_configs.yaml"
 )
 MUL_CONFIG_PATH = (
     SCRIPT_PATH.parents[1] / "contracts" / "configs" / "mul_flagtune_configs.yaml"
@@ -157,9 +160,16 @@ def test_operator_yaml_compiles_shape_dispatch_and_benchmark_contract():
 
     assert spec.op_id == "flaggems/mm"
     assert spec.public_operator_name == "mm"
-    assert spec.shape.identity == ("B", "M", "N", "K")
+    assert spec.shape.identity == ("B", "M", "N", "K", "B_layout")
     assert spec.shape.count_field == "Count"
-    assert spec.dispatch_order == ("gemv", "splitk", "general_tma")
+    assert spec.dispatch_order == (
+        "gemv",
+        "splitk_two_step",
+        "splitk",
+        "general_tma",
+        "tma_transposed_direct",
+    )
+    assert spec.explicit_variant_selection is True
     assert [tensor.name for tensor in spec.benchmark.tensors] == ["a", "b"]
     assert [tensor.dtype for tensor in spec.benchmark.tensors] == [
         "runtime",
@@ -167,6 +177,10 @@ def test_operator_yaml_compiles_shape_dispatch_and_benchmark_contract():
     ]
     assert tuple(reference.name for reference in spec.benchmark.args) == ("a", "b")
     assert spec.resolve_variant({"B": 1, "M": 16, "N": 1, "K": 4096}) == "gemv"
+    assert spec.shape.fields["B_layout"].choices == (
+        "contiguous",
+        "transposed_2d",
+    )
 
 
 def test_mul_operator_yaml_compiles_broadcast_and_scalar_variants():
@@ -399,10 +413,10 @@ def test_load_new_shape_spec_with_optional_count(tmp_path):
     )
 
     assert len(records) == 2
-    assert records[0].shape == [1, 16, 32, 64]
-    assert records[0].shape_key == "1,16,32,64"
+    assert records[0].shape == [1, 16, 32, 64, "contiguous"]
+    assert records[0].shape_key == "1,16,32,64,contiguous"
     assert records[0].count == 7
-    assert records[1].shape == [1, 32, 64, 128]
+    assert records[1].shape == [1, 32, 64, 128, "contiguous"]
     assert records[1].count is None
 
 
@@ -424,7 +438,7 @@ def test_load_legacy_shape_desc_without_count(tmp_path):
         path, mod.load_operator_benchmark_spec(CONFIG_PATH)
     )
 
-    assert records[0].shape == [1, 128, 256, 512]
+    assert records[0].shape == [1, 128, 256, 512, "contiguous"]
     assert records[0].count is None
 
 
@@ -813,6 +827,9 @@ def test_write_outputs_keeps_structured_jsonl_and_flat_csv(tmp_path):
             "op_id",
             "op_name",
             "variant",
+            "route_variant",
+            "tuning_variant",
+            "stage",
             "B",
             "M",
             "N",
@@ -830,6 +847,7 @@ def test_write_outputs_keeps_structured_jsonl_and_flat_csv(tmp_path):
             "first_call_ms",
             "tuning_time_ms",
             "latency_source",
+            "latency_scope",
             "benchmark_requested_mode",
             "benchmark_resolved_mode",
             "benchmark_implementation",
@@ -1037,12 +1055,24 @@ def test_generic_scheduler_prepares_cases_from_operator_yaml():
         CONFIG_PATH,
     )
 
-    assert tasks[0].payload["values"] == {"B": 1, "M": 17, "N": 3, "K": 32}
+    assert tasks[0].payload["values"] == {
+        "B": 1,
+        "M": 17,
+        "N": 3,
+        "K": 32,
+        "B_layout": "contiguous",
+    }
     assert tasks[0].payload["configs"] == configs
     assert tasks[0].payload["variant"] == "general_tma"
     assert set(tasks[0].to_json()) == {"task_index", "payload"}
     assert tasks[1].payload["variant"] == "gemv"
-    assert tasks[2].payload["values"] == {"B": 1, "M": 32, "N": 32, "K": 32}
+    assert tasks[2].payload["values"] == {
+        "B": 1,
+        "M": 32,
+        "N": 32,
+        "K": 32,
+        "B_layout": "contiguous",
+    }
     assert tasks[3].payload["count"] == 7
 
 
@@ -1086,8 +1116,8 @@ def test_public_batch_api_returns_input_order_and_fail_fast_state(
     )
 
     assert [row["token"] for row in batch.results] == [
-        {"B": 1, "M": 16, "N": 16, "K": 16},
-        {"B": 1, "M": 32, "N": 32, "K": 32},
+        {"B": 1, "M": 16, "N": 16, "K": 16, "B_layout": "contiguous"},
+        {"B": 1, "M": 32, "N": 32, "K": 32, "B_layout": "contiguous"},
     ]
     assert len(seen["tasks"]) == 2
     assert seen["kwargs"]["operator_config"] == CONFIG_PATH.resolve()

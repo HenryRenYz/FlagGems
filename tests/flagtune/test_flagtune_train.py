@@ -194,12 +194,16 @@ def _run_training_with_results(mod, monkeypatch, tmp_path, results, exported):
     """Run the training coordinator with collection and XGBoost boundaries faked."""
 
     class Record:
+        variant = "general_tma"
+
         @staticmethod
         def to_benchmark_shape():
             return {"M": 16}
 
     variant = SimpleNamespace(
         name="general_tma",
+        op_id="flaggems/mm",
+        normalize_inputs=lambda values: {"M": values["M"]},
         feature_names=("M",),
         iter_configs=lambda: iter(({"BLOCK": 16},)),
     )
@@ -208,6 +212,7 @@ def _run_training_with_results(mod, monkeypatch, tmp_path, results, exported):
         get_variant=lambda _name: variant,
     )
     spec = SimpleNamespace(
+        op_id="flaggems/mm",
         operator_info=operator_info,
         source_sha256="sha256",
         shape=SimpleNamespace(identity=("M",)),

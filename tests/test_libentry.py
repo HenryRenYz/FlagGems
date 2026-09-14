@@ -1852,15 +1852,18 @@ def test_benchmark_success_count_tracks_finite_uncached_benchmarks(monkeypatch):
     assert tuner._last_benchmark_meta == {}
     assert tuner._run_mode is LibTunerRunMode.NORMAL
 
-    # A one-config tuner bypasses autotuning even when Cost Model mode is set;
-    # there is no selection work or benchmark cache entry to perform.
+    # Cost Model mode enters policy even with one declared config: the actual
+    # runtime candidate space is resolved by policy and may contain more configs.
+    # This fake policy reuses the existing latency without a fresh benchmark.
     tuner.configs = [configs[0]]
     tuner._flagtune_mode = flagtune_runtime_mod.TuningMode.COST_MODEL
     config_cache.values.clear()
     policy_calls = tuner.policy_call_count
     LibTuner.run(tuner, 32)
-    assert tuner.policy_call_count == policy_calls
+    assert tuner.policy_call_count == policy_calls + 1
     assert tuner.best_config is configs[0]
+    assert tuner.benchmark_success_count == 0
+    assert tuner.benchmark_cache_hit_count == 1
 
 
 def test_benchmark_key_preserves_raw_shape_and_scopes_timing_protocol(monkeypatch):

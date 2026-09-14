@@ -499,10 +499,15 @@ def test_official_triton_libtuner_uses_unadapted_routes(
 
     changed = LibTuner.apply_flagtune(tuner)
 
-    assert changed is use_expanded_configs
+    # The first call initializes the selection token even in Default mode.
+    assert changed is True
     assert tuner._flagtune_mode.value == expected_mode
     expected_configs = expanded_configs if use_expanded_configs else default_configs
     assert tuner.configs is expected_configs
+    assert tuner.strategy == (
+        "expanded_strategy" if use_expanded_configs else "default_strategy"
+    )
+    assert LibTuner.apply_flagtune(tuner) is False
 
 
 def softmax_inner_decorator_cascade(x, dim, dtype=None):

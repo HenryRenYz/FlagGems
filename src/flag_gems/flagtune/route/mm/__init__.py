@@ -9,8 +9,8 @@ from .resolver import (
     ADAPTED_VARIANTS,
     ROUTE_TO_STAGE,
     _select_mm_route,
-    route_metadata_for_variant,
     resolve_mm_route,
+    route_metadata_for_variant,
 )
 
 
@@ -42,6 +42,7 @@ def make_recipe_id(
         dynamic_inputs,
         route_variant=route_variant,
     )
+
 
 __all__ = [
     "ADAPTED_VARIANTS",

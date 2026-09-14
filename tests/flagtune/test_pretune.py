@@ -57,10 +57,7 @@ SCRIPT_PATH = (
 )
 BENCHMARK_PATH = SCRIPT_PATH.parents[1] / "collection" / "scheduler.py"
 CONFIG_PATH = (
-    SCRIPT_PATH.parents[1]
-    / "contracts"
-    / "configs"
-    / "mm_hopper_flagtune_configs.yaml"
+    SCRIPT_PATH.parents[1] / "contracts" / "configs" / "mm_hopper_flagtune_configs.yaml"
 )
 MUL_CONFIG_PATH = (
     SCRIPT_PATH.parents[1] / "contracts" / "configs" / "mul_flagtune_configs.yaml"

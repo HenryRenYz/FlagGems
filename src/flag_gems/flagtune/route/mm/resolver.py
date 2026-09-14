@@ -5,13 +5,9 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from ..common import (
-    backend_module,
-    platform,
-)
+from ..common import backend_module, platform
 from .hopper import select_mm_route as _select_hopper_mm_route
 from .metax import select_mm_route as _select_metax_mm_route
-
 
 ADAPTED_VARIANTS = {
     "nvidia": frozenset(
@@ -64,8 +60,12 @@ def _recipe_values(a: Any, b: Any, context: Mapping[str, Any]) -> dict[str, Any]
             values.setdefault("M", int(a.shape[0]))
             values.setdefault("K", int(a.shape[1]))
             values.setdefault("N", int(b.shape[1]))
-            values.setdefault("A_layout", "transposed_2d" if a.stride(1) != 1 else "contiguous")
-            values.setdefault("B_layout", "transposed_2d" if b.stride(0) == 1 else "contiguous")
+            values.setdefault(
+                "A_layout", "transposed_2d" if a.stride(1) != 1 else "contiguous"
+            )
+            values.setdefault(
+                "B_layout", "transposed_2d" if b.stride(0) == 1 else "contiguous"
+            )
             values.setdefault("stride_am", int(a.stride(0)))
             values.setdefault("stride_ak", int(a.stride(1)))
             values.setdefault("stride_bk", int(b.stride(0)))
@@ -95,7 +95,9 @@ def route_metadata_for_variant(
         "route_variant": physical,
         "tuning_variant": tuning_variant if adapted else None,
         "stage": stage if adapted else None,
-        "latency_scope": "partial_kernel" if stage == "partial" and adapted else "public_kernel",
+        "latency_scope": (
+            "partial_kernel" if stage == "partial" and adapted else "public_kernel"
+        ),
         "physical_route": physical,
         "cost_model_variant": tuning_variant if adapted else None,
         "dynamic_inputs": dict(dynamic_inputs or {}),
@@ -125,7 +127,21 @@ def _dynamic_inputs(module: Any, physical: str, a: Any, b: Any) -> dict[str, Any
         elif physical == "general_tma":
             result["USE_TMA"] = True
         elif physical == "warp_specialized":
-            result["WS_PLAN"] = int(module._select_warp_specialized_dispatch_plan(a, b, module.torch.empty((m, n), device=a.device, dtype=module.get_higher_dtype(a.dtype, b.dtype)), m, n, k) or 0)
+            result["WS_PLAN"] = int(
+                module._select_warp_specialized_dispatch_plan(
+                    a,
+                    b,
+                    module.torch.empty(
+                        (m, n),
+                        device=a.device,
+                        dtype=module.get_higher_dtype(a.dtype, b.dtype),
+                    ),
+                    m,
+                    n,
+                    k,
+                )
+                or 0
+            )
             result["B_ROW_MAJOR"] = bool(b.stride(1) == 1)
         elif physical in {"tma_transposed_direct", "tma_transposed_splitk"}:
             result["B_ROW_MAJOR"] = bool(b.stride(1) == 1)
@@ -136,7 +152,9 @@ def _dynamic_inputs(module: Any, physical: str, a: Any, b: Any) -> dict[str, Any
     return result
 
 
-def resolve_mm_route(a: Any, b: Any, runtime_context: Mapping[str, Any] | None = None) -> dict[str, Any]:
+def resolve_mm_route(
+    a: Any, b: Any, runtime_context: Mapping[str, Any] | None = None
+) -> dict[str, Any]:
     """Resolve one MM recipe to a physical route and model variant.
 
     ``a``/``b`` must be real tensors for prediction.  Non-tensor callers may
@@ -173,7 +191,9 @@ def resolve_mm_route(a: Any, b: Any, runtime_context: Mapping[str, Any] | None =
         return result
     result = route_metadata_for_variant(physical, platform_name, dynamic)
     result["values"] = values
-    result["reason"] = f"{source}: adapted variant" if result["adapted"] else (
-        f"{source}: planned_skip for physical route {physical!r}"
+    result["reason"] = (
+        f"{source}: adapted variant"
+        if result["adapted"]
+        else (f"{source}: planned_skip for physical route {physical!r}")
     )
     return result

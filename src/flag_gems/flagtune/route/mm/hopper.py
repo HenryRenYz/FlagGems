@@ -36,7 +36,10 @@ def select_mm_route(a: Any, b: Any, module: Any) -> str:
     if module.splitk_scenario(a, b, m, n, k):
         if module._tma_splitk_two_step_config(a, b, c, m, n, k) is not None:
             return "tma_splitk_two_step"
-        if c.dtype == torch.float32 and not torch.are_deterministic_algorithms_enabled():
+        if (
+            c.dtype == torch.float32
+            and not torch.are_deterministic_algorithms_enabled()
+        ):
             return "splitk"
         if c.dtype in (torch.float16, torch.bfloat16, torch.float32):
             return "splitk_two_step"

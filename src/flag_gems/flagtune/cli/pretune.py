@@ -188,9 +188,10 @@ def _write_recipe_manifests(
     route_counts = {"adapted": 0, "planned_skip": 0, "failed": 0, "route_drift": 0}
     recipe_path = run_dir / "recipe_manifest.jsonl"
     route_path = run_dir / "route_manifest.jsonl"
-    with recipe_path.open("w", encoding="utf-8") as recipes, route_path.open(
-        "w", encoding="utf-8"
-    ) as routes:
+    with (
+        recipe_path.open("w", encoding="utf-8") as recipes,
+        route_path.open("w", encoding="utf-8") as routes,
+    ):
         for record in selected:
             selected_key = (
                 record.selected_index if record.selected_index is not None else -1
@@ -833,9 +834,7 @@ def run_main(args: argparse.Namespace) -> int:
         for row in rows
         if isinstance((protocol := row.get("benchmark_protocol")), dict)
     }
-    failed_rows = sum(
-        row.get("status") not in {"ok", "skipped"} for row in rows
-    )
+    failed_rows = sum(row.get("status") not in {"ok", "skipped"} for row in rows)
     skipped_rows = sum(row.get("status") == "skipped" for row in rows)
     missing_rows = len(selected) - len(rows)
     write_outputs(run_dir, rows, spec.shape.identity)

@@ -7,7 +7,6 @@ from typing import Any, Callable
 
 from .mm import resolve_mm_route
 
-
 RouteResolver = Callable[[Any, Any, Mapping[str, Any] | None], dict[str, Any]]
 ROUTE_RESOLVERS: dict[str, RouteResolver] = {
     "mm": resolve_mm_route,
@@ -31,7 +30,9 @@ def resolve_route(
     try:
         resolver = ROUTE_RESOLVERS.get(key) or ROUTE_RESOLVERS[key.rsplit("/", 1)[-1]]
     except KeyError as exc:
-        raise ValueError(f"no route resolver registered for operator {op_id!r}") from exc
+        raise ValueError(
+            f"no route resolver registered for operator {op_id!r}"
+        ) from exc
     return resolver(a, b, runtime_context)
 
 

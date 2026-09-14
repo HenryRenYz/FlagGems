@@ -84,14 +84,14 @@ from flag_gems.flagtune.collection.scheduler import (  # noqa: E402
     BenchmarkError,
     run_shape_config_benchmarks,
 )
+from flag_gems.flagtune.config_space import (  # noqa: E402
+    runtime_configs_for_variant,
+    runtime_configs_hash,
+)
 from flag_gems.flagtune.contracts.operator import (  # noqa: E402
     OperatorConfigError,
     initialize_planning_context,
     load_operator_benchmark_spec,
-)
-from flag_gems.flagtune.config_space import (  # noqa: E402
-    runtime_configs_hash,
-    runtime_configs_for_variant,
 )
 from flag_gems.flagtune.reporting.artifacts import (  # noqa: E402
     PretuneIOError,
@@ -449,9 +449,7 @@ def _collection_group_key(
     stage = route.get("stage") or (
         "partial" if str(tuning_variant).endswith("_partial") else "public"
     )
-    latency_scope = (
-        "partial_kernel" if stage == "partial" else "public_kernel"
-    )
+    latency_scope = "partial_kernel" if stage == "partial" else "public_kernel"
     return json.dumps(
         {
             "operator_id": variant_info.op_id,
@@ -512,6 +510,7 @@ def _append_collection_rows(
     written = 0
     finite = 0
     failed_shapes = 0
+
     # Worker results arrive in completion order.  The FlagTree ranker consumes
     # JSONL groups as contiguous runs.  Sort by the exact structured group key
     # (rather than source index alone) because distinct source rows can share
@@ -595,13 +594,20 @@ def _append_collection_rows(
             if result.get("latency_scope") not in {None, expected_scope}:
                 failed = pretune_json_row(result, shape_fields)
                 failed["collection_error"] = "latency_scope does not match tuning stage"
-                failure_file.write(json.dumps(failed, sort_keys=True, allow_nan=False) + "\n")
+                failure_file.write(
+                    json.dumps(failed, sort_keys=True, allow_nan=False) + "\n"
+                )
                 failed_shapes += 1
                 continue
-            if any(timing.get("latency_scope") not in {None, expected_scope} for timing in timings):
+            if any(
+                timing.get("latency_scope") not in {None, expected_scope}
+                for timing in timings
+            ):
                 failed = pretune_json_row(result, shape_fields)
                 failed["collection_error"] = "config timing latency_scope mismatch"
-                failure_file.write(json.dumps(failed, sort_keys=True, allow_nan=False) + "\n")
+                failure_file.write(
+                    json.dumps(failed, sort_keys=True, allow_nan=False) + "\n"
+                )
                 failed_shapes += 1
                 continue
             timed_config_count = result.get("timed_config_count")

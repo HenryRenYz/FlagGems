@@ -2048,8 +2048,10 @@ def test_config_cache_namespace_separates_replay_protocols():
     assert replay_ten != replay_five
 
 
-def test_adapted_config_cache_namespace_separates_tuning_modes():
-    """Prevent Default and Cost Model paths from sharing best-config rows."""
+def test_adapted_config_cache_namespace_separates_tuning_modes(monkeypatch):
+    """Separate modes, AUTO/REQUIRED intent, and legacy Cost Model cache rows."""
+    monkeypatch.delenv("USE_FLAGTUNE", raising=False)
+    monkeypatch.delenv("USE_FLAGTUNE_COST_MODEL", raising=False)
 
     class FakeTuner:
         __name__ = "mm"
@@ -2070,8 +2072,14 @@ def test_adapted_config_cache_namespace_separates_tuning_modes():
         "_flagtune_expanded"
     )
     assert names[flagtune_runtime_mod.TuningMode.COST_MODEL].endswith(
-        "_flagtune_cost_model"
+        "_flagtune_cost_model_auto_fallback_v2"
     )
+    tuner._flagtune_mode = flagtune_runtime_mod.TuningMode.COST_MODEL
+    monkeypatch.setenv("USE_FLAGTUNE_COST_MODEL", "1")
+    required_name = LibTuner._make_config_table_name(tuner)
+    assert required_name.endswith("_flagtune_cost_model_required_fallback_v2")
+    assert required_name not in names.values()
+    assert "mm_kernel_flagtune_cost_model" not in (*names.values(), required_name)
 
 
 @pytest.mark.parametrize(

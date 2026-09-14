@@ -64,6 +64,19 @@ MUL_CONFIG_PATH = (
 )
 
 
+@pytest.fixture
+def mm_stage_contract():
+    """Require stage-aware FlagTree only for tests compiling the MM YAML."""
+    from triton.flagtune.contract.operator_schema import VariantInfo
+
+    required = {"stage", "dtype_roles", "route_binding"}
+    if not required.issubset(getattr(VariantInfo, "__dataclass_fields__", {})):
+        pytest.skip(
+            "MM contract tests require stage-aware FlagTree "
+            "(stage, dtype_roles, route_binding); upgrade FlagTree to run them"
+        )
+
+
 def load_path(path, name):
     """Load one source file under an isolated module name and return the module."""
     spec = importlib.util.spec_from_file_location(name, path)
@@ -150,7 +163,9 @@ def write_yaml(path, payload):
     path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
 
 
-def test_operator_yaml_compiles_shape_dispatch_and_benchmark_contract():
+def test_operator_yaml_compiles_shape_dispatch_and_benchmark_contract(
+    mm_stage_contract,
+):
     """Compile all Pretune semantics without importing an MM support module."""
     mod = load_module()
     spec = mod.load_operator_benchmark_spec(CONFIG_PATH)
@@ -313,7 +328,7 @@ def test_mul_executor_uses_variant_specific_tensor_and_scalar_arguments():
     assert [entry[1] for entry in calls] == [(18,)]
 
 
-def test_operator_yaml_rejects_device_placement_policy(tmp_path):
+def test_operator_yaml_rejects_device_placement_policy(tmp_path, mm_stage_contract):
     """Keep device selection exclusively in the registered runtime adapter."""
     mod = load_module()
     payload = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8"))
@@ -325,7 +340,7 @@ def test_operator_yaml_rejects_device_placement_policy(tmp_path):
         mod.load_operator_benchmark_spec(path)
 
 
-def test_operator_yaml_rejects_arbitrary_invocation(tmp_path):
+def test_operator_yaml_rejects_arbitrary_invocation(tmp_path, mm_stage_contract):
     """Reject YAML-selected imports or callables outside the public API policy."""
     mod = load_module()
     payload = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8"))
@@ -337,7 +352,9 @@ def test_operator_yaml_rejects_arbitrary_invocation(tmp_path):
         mod.load_operator_benchmark_spec(path)
 
 
-def test_shared_safe_references_cover_fields_shapes_and_invoke_args(tmp_path):
+def test_shared_safe_references_cover_fields_shapes_and_invoke_args(
+    tmp_path, mm_stage_contract
+):
     """Use one ordered symbol contract across Pretune schema locations."""
     mod = load_module()
     payload = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8"))
@@ -352,7 +369,9 @@ def test_shared_safe_references_cover_fields_shapes_and_invoke_args(tmp_path):
     assert tuple(reference.name for reference in spec.benchmark.args) == ("a", "b")
 
 
-def test_shared_safe_references_reject_forward_dependencies_and_calls(tmp_path):
+def test_shared_safe_references_reject_forward_dependencies_and_calls(
+    tmp_path, mm_stage_contract
+):
     mod = load_module()
     payload = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8"))
     payload["pretune"]["shape"]["fields"]["B"]["default"] = "M"
@@ -372,7 +391,7 @@ def test_shared_safe_references_reject_forward_dependencies_and_calls(tmp_path):
         mod.load_operator_benchmark_spec(path)
 
 
-def test_operator_yaml_rejects_unknown_identity_namespace(tmp_path):
+def test_operator_yaml_rejects_unknown_identity_namespace(tmp_path, mm_stage_contract):
     """Allow only code-owned FlagGems public-operator resolution."""
     mod = load_module()
     payload = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8"))
@@ -391,7 +410,7 @@ def test_public_operator_resolution_reports_missing_callable():
         config_mod.resolve_public_operator(SimpleNamespace(), "flaggems/mm")
 
 
-def test_load_new_shape_spec_with_optional_count(tmp_path):
+def test_load_new_shape_spec_with_optional_count(tmp_path, mm_stage_contract):
     """Parse the new ordered shape schema and preserve optional Count metadata."""
     mod = load_module()
     path = tmp_path / "shapes.yaml"
@@ -417,7 +436,7 @@ def test_load_new_shape_spec_with_optional_count(tmp_path):
     assert records[1].count is None
 
 
-def test_load_legacy_shape_desc_without_count(tmp_path):
+def test_load_legacy_shape_desc_without_count(tmp_path, mm_stage_contract):
     """Retain legacy shape-description compatibility when Count is absent."""
     mod = load_module()
     path = tmp_path / "legacy.yaml"
@@ -456,7 +475,7 @@ def test_load_legacy_shape_desc_without_count(tmp_path):
         ),
     ],
 )
-def test_shape_validation_is_strict(tmp_path, payload, message):
+def test_shape_validation_is_strict(tmp_path, payload, message, mm_stage_contract):
     """Reject bad batches, dimensions, and operator keys with explicit errors."""
     mod = load_module()
     path = tmp_path / "bad.yaml"
@@ -1030,7 +1049,7 @@ def test_worker_success_and_failure_rows_use_platform_key(monkeypatch, tmp_path)
     load_module().write_outputs(tmp_path, [failure], ["M"])
 
 
-def test_generic_scheduler_prepares_cases_from_operator_yaml():
+def test_generic_scheduler_prepares_cases_from_operator_yaml(mm_stage_contract):
     """Prepare shapes and configs without importing an operator adapter."""
     mod = load_benchmark_module()
     shape = {"M": 17, "N": 3, "K": 32}

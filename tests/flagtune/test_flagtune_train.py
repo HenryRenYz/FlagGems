@@ -220,6 +220,7 @@ def _run_training_with_results(mod, monkeypatch, tmp_path, results, exported):
     context = SimpleNamespace(
         visible_device_count=1,
         backend_name="cuda",
+        vendor_name="nvidia",
         device_names=("NVIDIA H20-3e",),
         device_architectures=("sm90",),
     )
@@ -233,6 +234,17 @@ def _run_training_with_results(mod, monkeypatch, tmp_path, results, exported):
     run_dir.mkdir()
 
     monkeypatch.setattr(mod, "load_operator_benchmark_spec", lambda _path: spec)
+
+    def fake_runtime_configs(op_id, variant_name, *, platform):
+        assert (op_id, variant_name, platform) == (
+            "flaggems/mm",
+            "general_tma",
+            "nvidia",
+        )
+        return [SimpleNamespace(kwargs={"BLOCK": 16}, num_warps=4, num_stages=2)]
+
+    # Candidate resolution must not probe the CI host's actual backend/YAML.
+    monkeypatch.setattr(mod, "runtime_configs_for_variant", fake_runtime_configs)
     monkeypatch.setattr(
         mod, "load_shape_records", lambda _path, _spec: [Record(), Record()]
     )

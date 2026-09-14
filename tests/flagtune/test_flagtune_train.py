@@ -194,12 +194,16 @@ def _run_training_with_results(mod, monkeypatch, tmp_path, results, exported):
     """Run the training coordinator with collection and XGBoost boundaries faked."""
 
     class Record:
+        variant = "general_tma"
+
         @staticmethod
         def to_benchmark_shape():
             return {"M": 16}
 
     variant = SimpleNamespace(
         name="general_tma",
+        op_id="flaggems/mm",
+        normalize_inputs=lambda values: {"M": values["M"]},
         feature_names=("M",),
         iter_configs=lambda: iter(({"BLOCK": 16},)),
     )
@@ -416,12 +420,12 @@ def test_collection_rows_are_flattened_to_streaming_training_jsonl(tmp_path):
         "Count": 9,
     }
     assert row["ranking_group"] == {
-            "operator_id": "flaggems/mm",
-            "variant": "general_tma",
-            "route_variant": "general_tma",
-            "stage": "public",
-            "latency_scope": "public_kernel",
-            "dimensions": {
+        "operator_id": "flaggems/mm",
+        "variant": "general_tma",
+        "route_variant": "general_tma",
+        "stage": "public",
+        "latency_scope": "public_kernel",
+        "dimensions": {
             "M": 64,
             "N": 32,
             "K": 128,
@@ -601,9 +605,9 @@ def test_generic_config_timing_serialization_uses_triton_quantile_order():
             "config": {"BLOCK_M": 16, "num_warps": 4},
             "latency_ms": 1.2,
             "latency_p50_ms": 1.2,
-                "latency_p20_ms": 1.0,
-                "latency_p80_ms": None,
-                "status": "ok",
+            "latency_p20_ms": 1.0,
+            "latency_p80_ms": None,
+            "status": "ok",
         }
     ]
 

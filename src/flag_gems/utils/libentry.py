@@ -1017,7 +1017,8 @@ class LibTuner(triton.runtime.Autotuner):
             getattr(self, "_flagtune_op_id", None) in _COST_MODEL_DISABLED_OPS
             and runtime.resolve_cost_model_intent(
                 supports_cost_model=_supports_flagtune_cost_model(self)
-            ) is runtime.CostModelIntent.AUTO
+            )
+            is runtime.CostModelIntent.AUTO
         ):
             self.apply_flagtune()
         run_mode = LibTunerRunMode(getattr(self, "_run_mode", LibTunerRunMode.NORMAL))
@@ -1397,7 +1398,9 @@ def _flagtune_runtime_candidates(self, op_name, kwargs):
     early_config_prune = getattr(self, "early_config_prune", None)
     if early_config_prune is not None:
         candidate_configs = list(
-            early_config_prune(candidate_configs, {**(self.nargs or {}), **kwargs}, **kwargs)
+            early_config_prune(
+                candidate_configs, {**(self.nargs or {}), **kwargs}, **kwargs
+            )
         )
     if not candidate_configs:
         raise RuntimeError(
@@ -1497,7 +1500,9 @@ def _flagtune_legacy_fallback(self, bench_fn, args, kwargs, op_name):
         run_mode = LibTunerRunMode(getattr(self, "_run_mode", LibTunerRunMode.NORMAL))
         if run_mode is LibTunerRunMode.NORMAL:
             arguments = {**(self.nargs or {}), **kwargs}
-            key = self.get_key({k: v for k, v in arguments.items() if k in self.arg_names})
+            key = self.get_key(
+                {k: v for k, v in arguments.items() if k in self.arg_names}
+            )
             self._flagtune_fallback_cache = (self.cache, key)
             if key in self.cache:
                 cached = self.cache[key]
@@ -1548,7 +1553,8 @@ def flagtune_policy(
             # nor a model. Its ordinary benchmark failure is not a CM failure.
             loaded = (
                 _load_flagtune_model(self, identity_key, arguments)
-                if len(candidates) > 1 else None
+                if len(candidates) > 1
+                else None
             )
         if loaded is not None:
             phase = "postload"
@@ -1556,7 +1562,9 @@ def flagtune_policy(
             self._flagtune_strict_benchmark = True
             try:
                 with _cost_model_boundary(phase):
-                    return _run_flagtune_model(self, bench_fn, candidates, arguments, loaded)
+                    return _run_flagtune_model(
+                        self, bench_fn, candidates, arguments, loaded
+                    )
             finally:
                 self._flagtune_strict_benchmark = previous_strict
     except _flagtune_error_types() as exc:
@@ -1564,7 +1572,9 @@ def flagtune_policy(
             raise
         if op_id not in _COST_MODEL_DISABLED_OPS:
             _COST_MODEL_DISABLED_OPS.add(op_id)
-            fallback_mode = runtime.resolve_tuning_mode(op_name, supports_cost_model=False)
+            fallback_mode = runtime.resolve_tuning_mode(
+                op_name, supports_cost_model=False
+            )
             logger.warning(
                 "FlagTune AUTO Cost Model disabled for operator %s on all devices "
                 "and variants in this process; failed identity=%s; "
@@ -1784,11 +1794,13 @@ class LibEntry(triton.KernelInterface):
             for p in self.jit_function.params
             if not p.is_constexpr and p.do_not_specialize
         ]
-        # The dispatch cache is process-local. Avoid one semaphore per kernel
-        # exhausting macOS's low file-descriptor limit.
-        self.lock = (
-            threading.Lock() if sys.platform == "darwin" else multiprocessing.Lock()
-        )
+        if sys.platform == "darwin":
+            # A process-shared semaphore consumes one file descriptor per
+            # decorated kernel and can exhaust macOS's low default limit. The
+            # cache is process-local, so only threads need serialization here.
+            self.lock = threading.Lock()
+        else:
+            self.lock = multiprocessing.Lock()
         self.signature = fn.signature
 
     @staticmethod

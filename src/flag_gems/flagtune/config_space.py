@@ -6,7 +6,6 @@ import hashlib
 import json
 from typing import Any, Optional
 
-
 _RUNTIME_OPS = {
     "flaggems/mul": {
         "scalar": "mul",
@@ -52,7 +51,11 @@ def runtime_configs_for_variant(
     platform_text = str(platform or runtime.device.vendor_name).lower()
     if "metax" in platform_text or "maca" in platform_text:
         platform_name = "metax"
-    elif "nvidia" in platform_text or "hopper" in platform_text or "cuda" in platform_text:
+    elif (
+        "nvidia" in platform_text
+        or "hopper" in platform_text
+        or "cuda" in platform_text
+    ):
         platform_name = "nvidia"
     else:
         platform_name = platform_text

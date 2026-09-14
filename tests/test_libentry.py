@@ -1269,7 +1269,10 @@ def test_enabled_flagtree_policy_propagates_contract_failures(
 @pytest.mark.parametrize("phase", ["preload", "postload"])
 @pytest.mark.parametrize("setting", [None, "1", " 1 "])
 def test_cost_model_failures_fuse_only_auto(monkeypatch, caplog, phase, setting):
-    from triton.flagtune.runtime.errors import FlagTuneError
+    FlagTuneError = pytest.importorskip(
+        "triton.flagtune.runtime.errors",
+        reason="AUTO fuse tests require FlagTree's unified runtime errors",
+    ).FlagTuneError
 
     monkeypatch.delenv("USE_FLAGTUNE", raising=False)
     if setting is None:
@@ -1341,7 +1344,10 @@ def test_cost_model_failures_fuse_only_auto(monkeypatch, caplog, phase, setting)
 def test_auto_fuse_covers_all_devices_variants_and_dtypes_of_only_one_op(
     monkeypatch, caplog
 ):
-    from triton.flagtune.runtime.errors import FlagTuneError
+    FlagTuneError = pytest.importorskip(
+        "triton.flagtune.runtime.errors",
+        reason="AUTO fuse tests require FlagTree's unified runtime errors",
+    ).FlagTuneError
 
     monkeypatch.delenv("USE_FLAGTUNE", raising=False)
     monkeypatch.delenv("USE_FLAGTUNE_COST_MODEL", raising=False)

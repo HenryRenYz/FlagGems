@@ -1093,7 +1093,7 @@ def test_generic_scheduler_prepares_cases_from_operator_yaml(mm_stage_contract):
 
 
 def test_public_batch_api_returns_input_order_and_fail_fast_state(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, mm_stage_contract
 ):
     """Forward scheduler options and preserve ordered rows plus batch metadata."""
     mod = load_benchmark_module()
@@ -1146,7 +1146,9 @@ def test_public_batch_api_returns_input_order_and_fail_fast_state(
     assert batch.fail_fast_triggered is True
 
 
-def test_public_batch_api_rejects_unknown_or_misaligned_input_dtypes(tmp_path):
+def test_public_batch_api_rejects_unknown_or_misaligned_input_dtypes(
+    tmp_path, mm_stage_contract
+):
     mod = load_benchmark_module()
     cases = [({"M": 16, "N": 16, "K": 16}, None)]
     common = {

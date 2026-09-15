@@ -214,9 +214,8 @@ def pytest_addoption(parser):
         default=None,
         choices=["nn", "nt", "both"],
         help=(
-            "Select the B layout for the MM benchmark: nn uses row-major B, "
-            "nt uses column-major B, and both runs both layouts. By default, "
-            "core runs nn while comprehensive runs both."
+            "Select the right-hand-side storage layout for MM benchmarks. "
+            "When omitted, core keeps NN and comprehensive keeps NN+NT."
         ),
     )
 

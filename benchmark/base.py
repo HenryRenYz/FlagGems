@@ -334,6 +334,18 @@ class Benchmark:
             end = time.time()
             latency = (end - start) / n_rep * 1000
         elif Config.mode == consts.BenchMode.CUDAGRAPH:
+            # PPU's ``do_bench_cudagraph`` accepts only the replay duration
+            # and performs a fixed one-call warmup internally.  Honor the
+            # benchmark CLI's warmup duration explicitly before graph capture
+            # so ``--warmup`` is an executed setting rather than metadata only.
+            if vendor_name == "thead" and Config.warm_up > 0:
+                triton.testing.do_bench(
+                    fn,
+                    warmup=Config.warm_up,
+                    rep=1,
+                    return_mode="median",
+                    grad_to_none=xs if self.is_backward else None,
+                )
             do_bench_cudagraph = triton.testing.do_bench_cudagraph
             latency = do_bench_cudagraph(
                 fn,
@@ -681,12 +693,30 @@ class BlasBenchmark(Benchmark):
         self.input_fn = input_fn
 
     def get_input_iter(self, dtype) -> Generator:
-        for b, m, n, k in self.shapes:
-            yield from self.input_fn(b, m, n, k, dtype, self.device, False)
+        if self.op_name == "mm" and Config.mm_layout is not None:
+            column_major_values = {
+                "nn": (False,),
+                "nt": (True,),
+                "both": (False, True),
+            }[Config.mm_layout]
+        else:
+            column_major_values = (
+                (False, True)
+                if Config.bench_level == consts.BenchLevel.COMPREHENSIVE
+                else (False,)
+            )
 
-        if Config.bench_level == consts.BenchLevel.COMPREHENSIVE:
-            for b, m, n, k in self.shapes:
-                yield from self.input_fn(b, m, n, k, dtype, self.device, True)
+        for b_column_major in column_major_values:
+            for shape in self.shapes:
+                if len(shape) not in (4, 5):
+                    raise ValueError(
+                        "BLAS benchmark shapes must be [B, M, N, K] or "
+                        f"[B, M, N, K, Count], got {shape}"
+                    )
+                b, m, n, k = shape[:4]
+                yield from self.input_fn(
+                    b, m, n, k, dtype, self.device, b_column_major
+                )
 
     def set_more_shapes(self):
         large_k_shapes = [

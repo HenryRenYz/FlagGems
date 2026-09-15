@@ -83,6 +83,11 @@ class ResolvedBenchmarker:
 _REPLAY_IMPLEMENTATIONS = {
     "triton.backends.nvidia.driver": "triton_cuda_graph_replay_v1",
     "triton.backends.amd.driver": "triton_hip_graph_replay_v1",
+    # T-Head PPU exposes CUDA-compatible graph/event APIs through HGGC, but
+    # uses its own Triton driver. Keep its cache namespace distinct from
+    # NVIDIA: graph support is compatible, while the implementation/runtime
+    # is not the same backend.
+    "triton.backends.ppu.driver": "triton_hggc_graph_replay_v1",
 }
 _OFFICIAL_TRITON_REPLAY_COUNT = 10
 

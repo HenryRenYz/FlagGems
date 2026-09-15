@@ -272,6 +272,181 @@ class TunedConfigLoader(object):
                 for w in ranges["w"]
             ]
 
+        if op_name == "mm_ppu":
+            # PPU num_stages controls both Triton's software-pipeline option
+            # and the explicit tl.range PIPE_STAGES constexpr.  Generate them
+            # from the same loop variable instead of taking an accidental
+            # Cartesian product of two nominally identical stage axes.
+            configs = []
+            element_bytes = 2  # PPU mm accepts FP16/BF16 only.
+            shared_memory_budget = 240 * 1024
+            max_accumulators_per_thread = 128
+            for block_m in ranges["BLOCK_M"]:
+                for block_n in ranges["BLOCK_N"]:
+                    for block_k in ranges["BLOCK_K"]:
+                        for group_m in ranges["GROUP_M"]:
+                            for load_mode in ranges["LOAD_MODE"]:
+                                for stages in ranges["s"]:
+                                    pipeline_buffers = max(stages - 1, 1)
+                                    shared_memory = (
+                                        (block_m + block_n)
+                                        * block_k
+                                        * element_bytes
+                                        * pipeline_buffers
+                                    )
+                                    if shared_memory > shared_memory_budget:
+                                        continue
+                                    for warps in ranges["w"]:
+                                        accumulators_per_thread = (
+                                            block_m * block_n // (warps * 32)
+                                        )
+                                        if (
+                                            accumulators_per_thread
+                                            > max_accumulators_per_thread
+                                        ):
+                                            continue
+                                        configs.append(
+                                            triton.Config(
+                                                {
+                                                    "BLOCK_M": block_m,
+                                                    "BLOCK_N": block_n,
+                                                    "BLOCK_K": block_k,
+                                                    "GROUP_M": group_m,
+                                                    "LOAD_MODE": load_mode,
+                                                    "PIPE_STAGES": stages,
+                                                },
+                                                num_stages=stages,
+                                                num_warps=warps,
+                                                pre_hook=pre_hook,
+                                            )
+                                        )
+            return configs
+
+        if op_name == "mm_ppu_narrow_n":
+            return [
+                triton.Config(
+                    {
+                        "BLOCK_M": block_m,
+                        "BLOCK_N": block_n,
+                        "BLOCK_K": block_k,
+                        "LOAD_MODE": load_mode,
+                        "PIPE_STAGES": stages,
+                    },
+                    num_stages=stages,
+                    num_warps=warps,
+                    pre_hook=pre_hook,
+                )
+                for block_m in ranges["BLOCK_M"]
+                for block_n in ranges["BLOCK_N"]
+                for block_k in ranges["BLOCK_K"]
+                for load_mode in ranges["LOAD_MODE"]
+                for stages in ranges["s"]
+                for warps in ranges["w"]
+            ]
+
+        if op_name == "mm_ppu_grouped_row_gemv":
+            return [
+                triton.Config(
+                    {
+                        "BLOCK_M": block_m,
+                        "BLOCK_K": block_k,
+                        "ROWS_PER_PROGRAM": rows_per_program,
+                        "PIPE_STAGES": stages,
+                    },
+                    num_stages=stages,
+                    num_warps=warps,
+                    pre_hook=pre_hook,
+                )
+                for block_m in ranges["BLOCK_M"]
+                for block_k in ranges["BLOCK_K"]
+                for rows_per_program in ranges["ROWS_PER_PROGRAM"]
+                for stages in ranges["s"]
+                for warps in ranges["w"]
+            ]
+
+        if op_name in ("mm_ppu_small_m", "mm_ppu_mid_m"):
+            configs = []
+            element_bytes = 2
+            shared_memory_budget = 240 * 1024
+            fixed_block_m = 16
+            include_block_m = op_name == "mm_ppu_mid_m"
+            if include_block_m:
+                fixed_block_m = 32
+            for block_n in ranges["BLOCK_N"]:
+                for block_k in ranges["BLOCK_K"]:
+                    for load_mode in ranges["LOAD_MODE"]:
+                        for stages in ranges["s"]:
+                            pipeline_buffers = max(stages - 1, 1)
+                            shared_memory = (
+                                (fixed_block_m + block_n)
+                                * block_k
+                                * element_bytes
+                                * pipeline_buffers
+                            )
+                            if shared_memory > shared_memory_budget:
+                                continue
+                            for warps in ranges["w"]:
+                                configs.append(
+                                    triton.Config(
+                                        {
+                                            **(
+                                                {"BLOCK_M": fixed_block_m}
+                                                if include_block_m
+                                                else {}
+                                            ),
+                                            "BLOCK_N": block_n,
+                                            "BLOCK_K": block_k,
+                                            "LOAD_MODE": load_mode,
+                                            "PIPE_STAGES": stages,
+                                        },
+                                        num_stages=stages,
+                                        num_warps=warps,
+                                        pre_hook=pre_hook,
+                                    )
+                                )
+            return configs
+
+        if op_name == "mm_ppu_split_k":
+            return [
+                triton.Config(
+                    {
+                        "BLOCK_M": block_m,
+                        "BLOCK_N": block_n,
+                        "BLOCK_K": block_k,
+                        "SPLIT_K": split_k,
+                        "LOAD_MODE": load_mode,
+                        "INTERLEAVED": interleaved,
+                        "PIPE_STAGES": stages,
+                    },
+                    num_stages=stages,
+                    num_warps=warps,
+                    pre_hook=pre_hook,
+                )
+                for block_m in ranges["BLOCK_M"]
+                for block_n in ranges["BLOCK_N"]
+                for block_k in ranges["BLOCK_K"]
+                for split_k in ranges["SPLIT_K"]
+                for load_mode in ranges["LOAD_MODE"]
+                for interleaved in ranges["INTERLEAVED"]
+                for stages in ranges["s"]
+                for warps in ranges["w"]
+                if split_k > 0
+            ]
+
+        if op_name == "mm_ppu_split_k_reduce":
+            return [
+                triton.Config(
+                    {"BLOCK": block, "VEC": vec},
+                    num_stages=stages,
+                    num_warps=warps,
+                    pre_hook=pre_hook,
+                )
+                for block in ranges["BLOCK"]
+                for vec in ranges["VEC"]
+                for stages in ranges["s"]
+                for warps in ranges["w"]
+            ]
+
         if op_name in ("mm_nn", "mm_nt"):
             # "scenario" is optional so older expand yamls stay loadable, but
             # once present it must be set on every generated config: the tuner's
@@ -320,10 +495,21 @@ class TunedConfigLoader(object):
                 for w in ranges["w"]
             ]
 
-        if op_name in ("gemv", "gemv_k_parallel", "mm_w8a8_fp8_gemv"):
+        if op_name in (
+            "gemv",
+            "gemv_ppu",
+            "mm_ppu_multi_row_gemv",
+            "gemv_k_parallel",
+            "mm_w8a8_fp8_gemv",
+        ):
+            ppu_gemv = op_name in ("gemv_ppu", "mm_ppu_multi_row_gemv")
             return [
                 triton.Config(
-                    {"BLOCK_M": block_m, "BLOCK_K": block_k},
+                    {
+                        "BLOCK_M": block_m,
+                        "BLOCK_K": block_k,
+                        **({"PIPE_STAGES": s} if ppu_gemv else {}),
+                    },
                     num_stages=s,
                     num_warps=w,
                     pre_hook=pre_hook,
@@ -638,12 +824,101 @@ class TunedConfigLoader(object):
                 ),
             ),
             "gemv": self._build_single_expand_spec("gemv"),
+            "gemv_ppu": {
+                "yaml_op_name": "gemv_ppu",
+                "key": [
+                    "FUSE_ADDMM",
+                    "TRANSPOSED",
+                    "B_TRANSPOSED",
+                    "M",
+                    "K",
+                ],
+                "default_strategy": ["default"] * 5,
+                "expand_yaml_path": None,
+            },
+            "mm_ppu_multi_row_gemv": {
+                "yaml_op_name": "mm_ppu_multi_row_gemv",
+                "key": ["FUSE_ADDMM", "B_TRANSPOSED", "M", "N", "K"],
+                "default_strategy": ["default"] * 5,
+                "expand_yaml_path": None,
+            },
             "gemv_k_parallel": self._build_single_expand_spec(
                 "gemv", yaml_op_name="gemv_k_parallel"
             ),
             "mm": self._build_single_expand_spec(
                 "mm", expand_yaml_path=self._get_expand_config_path("mm")
             ),
+            "mm_ppu": {
+                "yaml_op_name": "mm_ppu",
+                "key": [
+                    "FUSE_ADDMM",
+                    "B_TRANSPOSED",
+                    "aiu_load_mask",
+                    "M",
+                    "N",
+                    "K",
+                ],
+                "default_strategy": ["default"] * 6,
+                "expand_yaml_path": None,
+            },
+            "mm_ppu_narrow_n": {
+                "yaml_op_name": "mm_ppu_narrow_n",
+                "key": [
+                    "FUSE_ADDMM",
+                    "B_TRANSPOSED",
+                    "aiu_load_mask",
+                    "M",
+                    "N",
+                    "K",
+                ],
+                "default_strategy": ["default"] * 6,
+                "expand_yaml_path": None,
+            },
+            "mm_ppu_small_m": {
+                "yaml_op_name": "mm_ppu_small_m",
+                "key": [
+                    "FUSE_ADDMM",
+                    "B_TRANSPOSED",
+                    "aiu_load_mask",
+                    "M",
+                    "N",
+                    "K",
+                ],
+                "default_strategy": ["default"] * 6,
+                "expand_yaml_path": None,
+            },
+            "mm_ppu_grouped_row_gemv": {
+                "yaml_op_name": "mm_ppu_grouped_row_gemv",
+                "key": ["FUSE_ADDMM", "B_TRANSPOSED", "M", "N", "K"],
+                "default_strategy": ["default"] * 5,
+                "expand_yaml_path": None,
+            },
+            "mm_ppu_mid_m": {
+                "yaml_op_name": "mm_ppu_mid_m",
+                "key": [
+                    "FUSE_ADDMM",
+                    "B_TRANSPOSED",
+                    "GROUPED_ROWS",
+                    "aiu_load_mask",
+                    "M",
+                    "N",
+                    "K",
+                ],
+                "default_strategy": ["default"] * 7,
+                "expand_yaml_path": None,
+            },
+            "mm_ppu_split_k": {
+                "yaml_op_name": "mm_ppu_split_k",
+                "key": ["B_TRANSPOSED", "aiu_load_mask", "M", "N", "K"],
+                "default_strategy": ["default"] * 5,
+                "expand_yaml_path": None,
+            },
+            "mm_ppu_split_k_reduce": {
+                "yaml_op_name": "mm_ppu_split_k_reduce",
+                "key": ["n_elements", "SPLIT_K"],
+                "default_strategy": ["default", "default"],
+                "expand_yaml_path": None,
+            },
             "mm_nn": self._build_single_expand_spec("mm_nn"),
             "mm_nt": self._build_single_expand_spec("mm_nt"),
             "mm_splitk_two_step": self._build_single_expand_spec(

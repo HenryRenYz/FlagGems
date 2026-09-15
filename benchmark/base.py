@@ -681,30 +681,12 @@ class BlasBenchmark(Benchmark):
         self.input_fn = input_fn
 
     def get_input_iter(self, dtype) -> Generator:
-        if self.op_name == "mm" and Config.mm_layout is not None:
-            column_major_values = {
-                "nn": (False,),
-                "nt": (True,),
-                "both": (False, True),
-            }[Config.mm_layout]
-        else:
-            column_major_values = (
-                (False, True)
-                if Config.bench_level == consts.BenchLevel.COMPREHENSIVE
-                else (False,)
-            )
+        for b, m, n, k in self.shapes:
+            yield from self.input_fn(b, m, n, k, dtype, self.device, False)
 
-        for b_column_major in column_major_values:
-            for shape in self.shapes:
-                if len(shape) not in (4, 5):
-                    raise ValueError(
-                        "BLAS benchmark shapes must be [B, M, N, K] or "
-                        f"[B, M, N, K, Count], got {shape}"
-                    )
-                b, m, n, k = shape[:4]
-                yield from self.input_fn(
-                    b, m, n, k, dtype, self.device, b_column_major
-                )
+        if Config.bench_level == consts.BenchLevel.COMPREHENSIVE:
+            for b, m, n, k in self.shapes:
+                yield from self.input_fn(b, m, n, k, dtype, self.device, True)
 
     def set_more_shapes(self):
         large_k_shapes = [

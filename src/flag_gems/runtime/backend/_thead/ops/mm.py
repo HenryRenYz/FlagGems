@@ -31,42 +31,38 @@ from flag_gems.ops.mm import mm_out as _generic_mm_out
 from flag_gems.ops.mv import mv as _generic_mv
 from flag_gems.runtime import torch_device_fn
 from flag_gems.utils import libentry, libtuner
-from flag_gems.utils.libentry import LibTuner
 
 from ._matmul_utils import (
-    EXPAND_CONFIG_FILENAME,
-    HAS_PPU_TLE,
+    _GEMV_PROGRAM_WIDTH,
+    _GEMV_REDUCTION_TILE,
+    _GEMV_ROW_VECTOR_MAX_WORK,
     _LOAD_A_AIU,
     _LOAD_B_AIU,
     _LOAD_BOTH_AIU,
     _LOAD_REGULAR,
-    _AIU_LOAD_A,
-    _AIU_LOAD_B,
-    _PPU_DESCRIPTOR_MAX_N,
     _PPU_DESCRIPTOR_CHUNK_N,
+    _PPU_DESCRIPTOR_MAX_N,
     _PPU_ULTRA_WIDE_DIRECT_M_MAX,
     _SMALL_M_TILE,
-    _GEMV_PROGRAM_WIDTH,
-    _GEMV_REDUCTION_TILE,
-    _GEMV_ROW_VECTOR_MAX_WORK,
+    EXPAND_CONFIG_FILENAME,
+    HAS_PPU_TLE,
     _aiu_load_mask,
     _configs_from_specs,
     _is_deep_fixed_row,
     _is_low_output_parallelism,
-    _prefer_deep_small_m_narrow,
+    _ppu_bucket_strategy,
+    _ppu_gemm_tile,
+    _ppu_reduction_bucket_strategy,
     _prefer_deep_mid_m,
+    _prefer_deep_small_m_narrow,
     _prefer_grouped_mid_m,
     _prefer_small_m_kernel,
-    _ppu_gemm_tile,
-    _ppu_bucket_strategy,
-    _ppu_reduction_bucket_strategy,
     _prune_gemm_configs,
     _prune_gemv_configs,
-    _prune_single_gemv_configs,
     _prune_grouped_row_gemv_configs,
     _prune_narrow_n_configs,
+    _prune_single_gemv_configs,
     _prune_split_k_configs,
-    _should_use_grouped_row_gemv,
     _should_use_multi_row_gemv,
     _should_use_narrow_n_gemv,
     _should_use_row_vector_gemv,
@@ -74,7 +70,6 @@ from ._matmul_utils import (
     _split_k_wave_plan,
     tle,
 )
-
 
 logger = logging.getLogger(__name__)
 
@@ -136,25 +131,6 @@ def _is_supported_ppu_b_layout(a: torch.Tensor, b: torch.Tensor) -> bool:
     """
     return b.is_contiguous() or (
         _is_transposed_contiguous_2d(b) and a.shape[1] % 128 == 0
-    )
-
-
-def _ppu_mm_flagtune_dtype_resolver(arguments):
-    """Match the public MM identity while excluding the optional bias buffer."""
-    first = arguments.get("A")
-    second = arguments.get("B", arguments.get("X"))
-    output = arguments.get("C", arguments.get("Y"))
-    if first is None or second is None:
-        raise ValueError("FlagTune MM identity requires two input tensors")
-    # Split-K writes a float32 workspace before its public BF16 reduction.  The
-    # model identity must describe the public mm input/output contract, so use
-    # the input dtype when that intermediate output is the only third tensor.
-    return (
-        first.dtype,
-        second.dtype,
-        output.dtype
-        if output is not None and output.dtype == first.dtype
-        else first.dtype,
     )
 
 
@@ -557,9 +533,7 @@ def _ppu_gemv_configs():
 def _ppu_multi_row_gemv_configs():
     """Reuse GEMV tiles except row-vector-only reductions wider than 2K."""
     return [
-        config
-        for config in _ppu_gemv_configs()
-        if config.kwargs["BLOCK_K"] <= 2048
+        config for config in _ppu_gemv_configs() if config.kwargs["BLOCK_K"] <= 2048
     ]
 
 
@@ -668,50 +642,6 @@ def _ppu_split_k_reduce_configs():
     ]
 
 
-@LibTuner.register_policy("ppu_gemv_stable")
-def _ppu_gemv_stable_policy(self, bench_fn, configs, args, kwargs):
-    """Recheck near-tied sub-10us GEMV winners with independent samples.
-
-    PPU graph timing can rank two sub-2us candidates differently when their
-    first p50 values differ by less than one percent.  The initial selection
-    remains the normal FlagTune/default autotune result.  Only candidates
-    within two percent of that result are measured three more times, and the
-    median independent p50 selects the persisted winner.
-    """
-
-    best_config, timings = LibTuner.get("flagtune").policy(
-        self, bench_fn, list(configs), args, kwargs
-    )
-
-    def p50(value):
-        if isinstance(value, (list, tuple)):
-            return float(value[0])
-        return float(value)
-
-    best_latency = p50(timings[best_config])
-    if best_latency >= 0.01:
-        return best_config, timings
-
-    tied = [
-        config
-        for config, timing in timings.items()
-        if p50(timing) <= best_latency * 1.02
-    ]
-    if len(tied) <= 1:
-        return best_config, timings
-
-    robust_scores = {}
-    for config in tied:
-        samples = []
-        for _ in range(3):
-            if hasattr(self, "seen_tuned_metas"):
-                self.seen_tuned_metas = {}
-            samples.append(p50(self._bench(*args, config=config, **kwargs)))
-        robust_scores[config] = sorted(samples)[1]
-        timings[config] = [robust_scores[config]] * 3
-    return min(robust_scores, key=robust_scores.get), timings
-
-
 if HAS_PPU_TLE:
 
     @libentry()
@@ -722,14 +652,9 @@ if HAS_PPU_TLE:
         prune_configs_by={"early_config_prune": _prune_single_gemv_configs},
         warmup=25,
         rep=100,
-        use_cuda_graph=True,
-        policy="ppu_gemv_stable",
         flagtune_op_name="mm",
         flagtune_expand_op_name="gemv_ppu",
-        flagtune_op_id="flaggems/mm",
-        flagtune_variant="gemv_ppu",
         flagtune_yaml_path=EXPAND_CONFIG_FILENAME,
-        flagtune_dtype_resolver=_ppu_mm_flagtune_dtype_resolver,
     )
     @triton.jit(do_not_specialize=["alpha", "beta"])
     def gemv_kernel_ppu(
@@ -835,9 +760,7 @@ if HAS_PPU_TLE:
     ):
         """Compute a bounded grid of independent row-vector reductions."""
         pid_m = tl.program_id(1).to(tl.int64)
-        cols = (
-            tl.program_id(0) * BLOCK_M + tl.arange(0, BLOCK_M)
-        ).to(tl.int64)
+        cols = (tl.program_id(0) * BLOCK_M + tl.arange(0, BLOCK_M)).to(tl.int64)
         offs_k = tl.arange(0, BLOCK_K)
         # Reduce each K tile immediately.  Keeping the full [BLOCK_K,
         # BLOCK_M] product matrix live until the end creates substantial
@@ -856,9 +779,7 @@ if HAS_PPU_TLE:
                 mask=(ks[:, None] < K) & (cols[None, :] < N),
                 other=0.0,
             )
-            acc += tl.sum(
-                b.to(tl.float32) * a[:, None].to(tl.float32), axis=0
-            )
+            acc += tl.sum(b.to(tl.float32) * a[:, None].to(tl.float32), axis=0)
 
         result = alpha * acc
         mask = cols < N
@@ -889,13 +810,9 @@ if HAS_PPU_TLE:
         prune_configs_by={"early_config_prune": _prune_gemv_configs},
         warmup=5,
         rep=20,
-        policy="flagtune",
         flagtune_op_name="mm",
         flagtune_expand_op_name="mm_ppu_narrow_columns",
-        flagtune_op_id="flaggems/mm",
-        flagtune_variant="mm_ppu_narrow_columns",
         flagtune_yaml_path=EXPAND_CONFIG_FILENAME,
-        flagtune_dtype_resolver=_ppu_mm_flagtune_dtype_resolver,
     )
     @triton.jit(do_not_specialize=["alpha", "beta"])
     def mm_narrow_columns_kernel_ppu(
@@ -1027,9 +944,7 @@ if HAS_PPU_TLE:
         result = alpha * acc
         if FUSE_ADDMM:
             bias = tl.load(
-                Bias
-                + rows[:, None] * stride_bias_m
-                + cols[None, :] * stride_bias_n,
+                Bias + rows[:, None] * stride_bias_m + cols[None, :] * stride_bias_n,
                 mask=row_mask[:, None] & col_mask[None, :],
                 other=0.0,
             ).to(tl.float32)
@@ -1058,13 +973,9 @@ if HAS_PPU_TLE:
         # compiler/cache warmup effects.
         warmup=20,
         rep=100,
-        policy="flagtune",
         flagtune_op_name="mm",
         flagtune_expand_op_name="mm_ppu",
-        flagtune_op_id="flaggems/mm",
-        flagtune_variant="ppu_gemm",
         flagtune_yaml_path=EXPAND_CONFIG_FILENAME,
-        flagtune_dtype_resolver=_ppu_mm_flagtune_dtype_resolver,
     )
     @triton.heuristics(
         values={
@@ -1172,13 +1083,9 @@ if HAS_PPU_TLE:
         prune_configs_by={"early_config_prune": _prune_narrow_n_configs},
         warmup=5,
         rep=10,
-        policy="flagtune",
         flagtune_op_name="mm",
         flagtune_expand_op_name="mm_ppu_narrow_n",
-        flagtune_op_id="flaggems/mm",
-        flagtune_variant="mm_ppu_narrow_n",
         flagtune_yaml_path=EXPAND_CONFIG_FILENAME,
-        flagtune_dtype_resolver=_ppu_mm_flagtune_dtype_resolver,
     )
     @triton.heuristics(
         values={
@@ -1262,7 +1169,6 @@ if HAS_PPU_TLE:
             FUSE_ADDMM,
         )
 
-
     @libentry()
     @libtuner(
         configs=_ppu_small_m_configs(),
@@ -1278,13 +1184,9 @@ if HAS_PPU_TLE:
         prune_configs_by={"early_config_prune": _prune_gemm_configs},
         warmup=5,
         rep=10,
-        policy="flagtune",
         flagtune_op_name="mm",
         flagtune_expand_op_name="mm_ppu_small_m",
-        flagtune_op_id="flaggems/mm",
-        flagtune_variant="mm_ppu_small_m",
         flagtune_yaml_path=EXPAND_CONFIG_FILENAME,
-        flagtune_dtype_resolver=_ppu_mm_flagtune_dtype_resolver,
     )
     @triton.heuristics(
         values={
@@ -1370,7 +1272,6 @@ if HAS_PPU_TLE:
             EVEN_N,
             FUSE_ADDMM,
         )
-
 
     @libentry()
     @libtuner(
@@ -1617,13 +1518,9 @@ if HAS_PPU_TLE:
         prune_configs_by={"early_config_prune": _prune_split_k_configs},
         warmup=5,
         rep=10,
-        policy="flagtune",
         flagtune_op_name="mm",
         flagtune_expand_op_name="mm_ppu_split_k",
-        flagtune_op_id="flaggems/mm",
-        flagtune_variant="mm_ppu_split_k",
         flagtune_yaml_path=EXPAND_CONFIG_FILENAME,
-        flagtune_dtype_resolver=_ppu_mm_flagtune_dtype_resolver,
     )
     @triton.jit
     def mm_split_k_kernel_ppu(
@@ -1700,19 +1597,13 @@ if HAS_PPU_TLE:
                 order=(1, 0),
             )
         acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
-        for k_offset in tl.range(
-            0, k_per_split, BLOCK_K, num_stages=PIPE_STAGES
-        ):
+        for k_offset in tl.range(0, k_per_split, BLOCK_K, num_stages=PIPE_STAGES):
             if INTERLEAVED:
-                offs_k = (
-                    k_begin
-                    + k_offset * SPLIT_K
-                    + tl.arange(0, BLOCK_K)
-                ).to(tl.int64)
+                offs_k = (k_begin + k_offset * SPLIT_K + tl.arange(0, BLOCK_K)).to(
+                    tl.int64
+                )
             else:
-                offs_k = (
-                    k_begin + k_offset + tl.arange(0, BLOCK_K)
-                ).to(tl.int64)
+                offs_k = (k_begin + k_offset + tl.arange(0, BLOCK_K)).to(tl.int64)
             if LOAD_MODE == 0 or LOAD_MODE == 1:
                 a = tle.load(
                     a_block_ptr,
@@ -1721,11 +1612,7 @@ if HAS_PPU_TLE:
                     is_async=True,
                 )
             else:
-                a_ptrs = (
-                    A
-                    + offs_m[:, None] * stride_am
-                    + offs_k[None, :] * stride_ak
-                )
+                a_ptrs = A + offs_m[:, None] * stride_am + offs_k[None, :] * stride_ak
                 a_mask = (offs_m[:, None] < M) & (offs_k[None, :] < K)
                 a = tl.load(a_ptrs, mask=a_mask, other=0.0)
             if LOAD_MODE == 0 or LOAD_MODE == 2:
@@ -1736,11 +1623,7 @@ if HAS_PPU_TLE:
                     is_async=True,
                 )
             else:
-                b_ptrs = (
-                    B
-                    + offs_k[:, None] * stride_bk
-                    + offs_n[None, :] * stride_bn
-                )
+                b_ptrs = B + offs_k[:, None] * stride_bk + offs_n[None, :] * stride_bn
                 b_mask = (offs_k[:, None] < K) & (offs_n[None, :] < N)
                 b = tl.load(b_ptrs, mask=b_mask, other=0.0)
             acc = tl.dot(a, b, acc=acc, out_dtype=tl.float32)
@@ -1758,7 +1641,6 @@ if HAS_PPU_TLE:
             tl.store(workspace_ptrs, acc)
         else:
             tl.store(workspace_ptrs, acc, mask=mask)
-
 
     @libtuner(
         configs=_ppu_split_k_reduce_configs(),
@@ -1799,9 +1681,7 @@ if HAS_PPU_TLE:
                 x1 = tl.load(workspace_ptrs + n_elements)
             else:
                 x0 = tl.load(workspace_ptrs, mask=mask, other=0.0)
-                x1 = tl.load(
-                    workspace_ptrs + n_elements, mask=mask, other=0.0
-                )
+                x1 = tl.load(workspace_ptrs + n_elements, mask=mask, other=0.0)
             acc += x0 + x1
             workspace_ptrs += 2 * n_elements
         if SPLIT_K % 2:
@@ -1813,6 +1693,7 @@ if HAS_PPU_TLE:
             tl.store(C + offsets, acc.to(C.dtype.element_ty))
         else:
             tl.store(C + offsets, acc.to(C.dtype.element_ty), mask=mask)
+
 
 def _can_use_ppu_mm(a: torch.Tensor, b: torch.Tensor, out: torch.Tensor) -> bool:
     if not (
@@ -1829,13 +1710,7 @@ def _can_use_ppu_mm(a: torch.Tensor, b: torch.Tensor, out: torch.Tensor) -> bool
 
     M, K = a.shape
     b_k, N = b.shape
-    return (
-        K == b_k
-        and out.shape == (M, N)
-        and M > 0
-        and N > 0
-        and K > 0
-    )
+    return K == b_k and out.shape == (M, N) and M > 0 and N > 0 and K > 0
 
 
 def _should_use_ppu_mm_gemv(M: int, N: int, K: int) -> bool:
@@ -1949,8 +1824,7 @@ def _run_ppu_mm(
 
     def launch(b_view, out_view, bias_view, width):
         grid = lambda META: (
-            triton.cdiv(M, META["BLOCK_M"])
-            * triton.cdiv(width, META["BLOCK_N"]),
+            triton.cdiv(M, META["BLOCK_M"]) * triton.cdiv(width, META["BLOCK_N"]),
         )
         mm_kernel_ppu[grid](
             a,
@@ -1972,17 +1846,11 @@ def _run_ppu_mm(
             bias_view.stride(1),
             B_TRANSPOSED=b_transposed,
             aiu_load_mask=_aiu_load_mask(a, b_view),
-            ALIGNED_A_512X128=(
-                allow_aligned_a and M % 512 == 0 and K % 128 == 0
-            ),
+            ALIGNED_A_512X128=(allow_aligned_a and M % 512 == 0 and K % 128 == 0),
             ALIGNED_B_128X128=width % 128 == 0 and K % 128 == 0,
             EVEN_K=K % 128 == 0,
             EVEN_M=M % 512 == 0
-            or (
-                not fuse_addmm
-                and _is_deep_fixed_row(M, width, K)
-                and M % 32 == 0
-            ),
+            or (not fuse_addmm and _is_deep_fixed_row(M, width, K) and M % 32 == 0),
             EVEN_N=width % 1024 == 0,
             FUSE_ADDMM=fuse_addmm,
         )
@@ -2002,17 +1870,14 @@ def _run_ppu_mm(
     return out
 
 
-def _select_ppu_mm_route(
-    M: int, N: int, K: int, *, b_transposed: bool
-) -> _PPUMMRoute:
+def _select_ppu_mm_route(M: int, N: int, K: int, *, b_transposed: bool) -> _PPUMMRoute:
     """Classify one legal MM shape without launching or touching a tensor."""
     # A true column product is either exact GEMV or the narrow matrix-unit
     # family.  Singleton and very tall columns explicitly remain GEMV regimes;
     # their complete legal configuration space is selected by LibTuner.
     if N == 1:
-        force_gemv = (
-            (M == 1 and K >= 1024)
-            or (M >= 8 * _GEMV_REDUCTION_TILE and K >= 1024)
+        force_gemv = (M == 1 and K >= 1024) or (
+            M >= 8 * _GEMV_REDUCTION_TILE and K >= 1024
         )
         if not force_gemv and _should_use_narrow_n_gemv(M, N, K):
             return _PPUMMRoute.NARROW_N
@@ -2046,11 +1911,7 @@ def _select_ppu_mm_route(
         output_tiles_1024 = triton.cdiv(N, 1024)
         nt_multi_row = nt_multi_row or (
             (M == 2 and reduction_tiles == 1 and output_tiles_1024 == 2)
-            or (
-                M == 2
-                and reduction_tiles == 4
-                and 3 <= output_tiles_1024 <= 4
-            )
+            or (M == 2 and reduction_tiles == 4 and 3 <= output_tiles_1024 <= 4)
             or (reduction_tiles >= 7 and triton.cdiv(N, 512) == 1)
         )
     if nt_multi_row:
@@ -2067,12 +1928,8 @@ def _select_ppu_mm_route(
     ):
         return _PPUMMRoute.NARROW_N
     if M == 1 and _should_use_ppu_mm_gemv(M, N, K):
-        gemv_override = (
-            (N <= 32 and K >= 8 * _GEMV_REDUCTION_TILE)
-            or (
-                N <= 256
-                and 2 * _GEMV_REDUCTION_TILE <= K < 6 * _GEMV_REDUCTION_TILE
-            )
+        gemv_override = (N <= 32 and K >= 8 * _GEMV_REDUCTION_TILE) or (
+            N <= 256 and 2 * _GEMV_REDUCTION_TILE <= K < 6 * _GEMV_REDUCTION_TILE
         )
         if not gemv_override and _should_use_row_vector_narrow_mm(M, N, K):
             return _PPUMMRoute.NARROW_N
@@ -2114,22 +1971,14 @@ def _select_ppu_mm_route(
     # A shallow 256-column product already exposes enough direct output work
     # across two to four BM64 row waves.  Main GEMM is both compiler-safe and
     # 8-30% faster than the historical split-K winners across this interval.
-    if (
-        2 * 64 <= M <= 4 * 64
-        and N == 2 * 128
-        and K == 2 * _GEMV_REDUCTION_TILE
-    ):
+    if 2 * 64 <= M <= 4 * 64 and N == 2 * 128 and K == 2 * _GEMV_REDUCTION_TILE:
         return _PPUMMRoute.MAIN
     # Split-K's workspace/reducer family is not compiler-safe for ultra-wide
     # descriptors (the PPU PassManager rejects the large-N program before
     # launch).  The regular Triton GEMM already handles these widths and
     # keeps the descriptor within one bounded launch, so leave split-K to the
     # latency-sized wide-N regime.
-    if (
-        M <= 32
-        and 1024 <= N <= 4096
-        and K >= 7 * _GEMV_REDUCTION_TILE
-    ):
+    if M <= 32 and 1024 <= N <= 4096 and K >= 7 * _GEMV_REDUCTION_TILE:
         return _PPUMMRoute.MAIN if b_transposed else _PPUMMRoute.SPLIT_K
     # Small-M matrix tiles are preferable to scalar/masked families once a
     # deep output spans multiple columns. Check this before the multi-row
@@ -2140,11 +1989,7 @@ def _select_ppu_mm_route(
     # Deep, very narrow products with a large physical row grid benefit from
     # K parallelism once the scalar/narrow matrix tile is under-filled.  The
     # workspace bound and candidate legality still constrain the split path.
-    if (
-        N <= 8
-        and K >= 8 * _GEMV_REDUCTION_TILE
-        and 8 * 64 <= M <= 32 * 64
-    ):
+    if N <= 8 and K >= 8 * _GEMV_REDUCTION_TILE and 8 * 64 <= M <= 32 * 64:
         return _PPUMMRoute.SPLIT_K
     if 32 < N <= 64 and K >= 7 * _GEMV_REDUCTION_TILE:
         row_tiles = triton.cdiv(M, 64)
@@ -2161,19 +2006,14 @@ def _select_ppu_mm_route(
     # useful for tiny scalar launches. Once a deep N<=32 matrix has more
     # than one row tile, the narrow-N matrix-unit kernel is faster.
     if N <= 32 and K >= 2 * _GEMV_REDUCTION_TILE and M > _SMALL_M_TILE:
-        if (
-            M >= 8 * _GEMV_REDUCTION_TILE
-            and K >= 8 * _GEMV_REDUCTION_TILE
-        ):
+        if M >= 8 * _GEMV_REDUCTION_TILE and K >= 8 * _GEMV_REDUCTION_TILE:
             return _PPUMMRoute.MAIN
         return _PPUMMRoute.NARROW_N
     if _should_use_multi_row_gemv(M, N, K):
         return _PPUMMRoute.MULTI_ROW_GEMV
     if _prefer_deep_small_m_narrow(1, M, N, K):
         return _PPUMMRoute.NARROW_N
-    if _prefer_grouped_mid_m(1, M, N, K) or _prefer_deep_mid_m(
-        1, M, N, K
-    ):
+    if _prefer_grouped_mid_m(1, M, N, K) or _prefer_deep_mid_m(1, M, N, K):
         return _PPUMMRoute.PARTIAL_M_GEMM
     if _should_use_split_k_mm(M, N, K):
         # Once NT B uses a native column-major AIU descriptor, ordinary GEMM
@@ -2192,11 +2032,7 @@ def _select_ppu_mm_route(
     # for several BM64 row waves.  Admit split-K continuously through 32 row
     # tiles; the workspace bound and legal split candidates still protect
     # larger products from excessive temporary traffic.
-    if (
-        256 < N <= 512
-        and K >= 7 * _GEMV_REDUCTION_TILE
-        and triton.cdiv(M, 64) <= 32
-    ):
+    if 256 < N <= 512 and K >= 7 * _GEMV_REDUCTION_TILE and triton.cdiv(M, 64) <= 32:
         # NT can load its physically dense [N, K] storage through the PPU
         # column-major AIU descriptor. That removes the B-load bottleneck
         # which originally justified a workspace split in this bucket; the
@@ -2208,11 +2044,7 @@ def _select_ppu_mm_route(
     # Once the physical BM64 row grid is already many waves, split-K's
     # workspace/reduction traffic dominates.  The regular AIU GEMM retains
     # enough output parallelism in this large-M, medium-N regime.
-    if (
-        256 <= N <= 512
-        and K >= 7 * _GEMV_REDUCTION_TILE
-        and triton.cdiv(M, 64) > 32
-    ):
+    if 256 <= N <= 512 and K >= 7 * _GEMV_REDUCTION_TILE and triton.cdiv(M, 64) > 32:
         return _PPUMMRoute.MAIN
     if _is_low_output_parallelism(M, N, K):
         return _PPUMMRoute.MAIN
@@ -2279,18 +2111,11 @@ def _run_partial_m_ppu_mm(
     _, N = b.shape
     fuse_addmm = bias is not None
     expanded_bias = bias.broadcast_to((M, N)) if fuse_addmm else out
-    kernel = (
-        mm_small_m_kernel_ppu
-        if M <= _SMALL_M_TILE
-        else mm_partial_m_kernel_ppu
-    )
+    kernel = mm_small_m_kernel_ppu if M <= _SMALL_M_TILE else mm_partial_m_kernel_ppu
     partial_meta = (
         {}
         if M <= _SMALL_M_TILE
-        else {
-            "GROUPED_ROWS": not fuse_addmm
-            and _prefer_grouped_mid_m(1, M, N, K)
-        }
+        else {"GROUPED_ROWS": not fuse_addmm and _prefer_grouped_mid_m(1, M, N, K)}
     )
     grid = lambda META: (triton.cdiv(N, META["BLOCK_N"]),)
     with torch_device_fn.device(a.device):
@@ -2457,12 +2282,8 @@ def _run_split_k_mm(
     # The tuner updates ``best_config`` inside the kernel launch.  It may still
     # contain the winner for a previous shape before this call, so allocate the
     # bounded maximum up front and read the active split count afterwards.
-    max_split_k = max(
-        config.kwargs["SPLIT_K"] for config in _ppu_split_k_configs()
-    )
-    workspace = torch.empty(
-        (max_split_k, M, N), device=out.device, dtype=torch.float32
-    )
+    max_split_k = max(config.kwargs["SPLIT_K"] for config in _ppu_split_k_configs())
+    workspace = torch.empty((max_split_k, M, N), device=out.device, dtype=torch.float32)
     grid = lambda META: (
         triton.cdiv(M, META["BLOCK_M"])
         * triton.cdiv(N, META["BLOCK_N"])
@@ -2493,12 +2314,8 @@ def _run_split_k_mm(
             if split_tuner is None:
                 raise RuntimeError("split-K tuner did not expose best_config")
         split_k = split_tuner.best_config.kwargs["SPLIT_K"]
-        reduce_grid = lambda META: (
-            triton.cdiv(M * N, META["BLOCK"] * META["VEC"]),
-        )
-        mm_split_k_reduce_kernel_ppu[
-            reduce_grid
-        ](
+        reduce_grid = lambda META: (triton.cdiv(M * N, META["BLOCK"] * META["VEC"]),)
+        mm_split_k_reduce_kernel_ppu[reduce_grid](
             workspace,
             out,
             M * N,
@@ -2540,10 +2357,7 @@ def _dispatch_ppu_mm(a: torch.Tensor, b: torch.Tensor, out: torch.Tensor):
 def mm(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     logger.debug("GEMS_THEAD MM")
     if not (
-        a.ndim == 2
-        and b.ndim == 2
-        and a.shape[1] == b.shape[0]
-        and a.dtype == b.dtype
+        a.ndim == 2 and b.ndim == 2 and a.shape[1] == b.shape[0] and a.dtype == b.dtype
     ):
         return _generic_mm(a, b)
     out = torch.empty((a.shape[0], b.shape[1]), device=a.device, dtype=a.dtype)

@@ -1,17 +1,3 @@
-# Copyright 2026 FlagOS Contributors
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-
-# Offline Expanded search space for the PPU NN/NT GEMM kernel.  The
-# production Pareto list remains in ops/mm.py and is used in Default mode.
-#
-# The Cartesian product is intentionally bounded.  The PPU-specific config
-# builder removes configurations that exceed the conservative shared-memory
-# budget or require more than 128 FP32 accumulator registers per thread.
 mm_ppu:
   - config:
     param_map:
@@ -26,9 +12,6 @@ mm_ppu:
     block_m:
       - 32
       - 64
-      # Larger row tiles remain available through the production Pareto
-      # candidates merged into the expanded pool.  Keeping the Cartesian
-      # exploration focused avoids thousands of redundant compiler jobs.
     block_n:
       - 16
       - 32
@@ -41,22 +24,12 @@ mm_ppu:
       - 32
       - 64
       - 128
-      # A single partial BM32 row tile with deep K benefits from a larger
-      # reduction tile; the runtime pruner admits this only in that
-      # low-wave bucket.
       - 256
     group_m:
       - 1
-      # GROUP_M variants from the production shortlist are appended below;
-      # expanded search only needs one representative grouping.
     load_mode:
-      # Both operands use TLE/AIU asynchronous loads. NT uses the PPU
-      # column-major order=(0,1) descriptor for logical B.
       - 0
-      # A uses a boundary-checked TLE/AIU descriptor while B stays on the
-      # regular pointer path.  This is important for partial-row wide GEMMs.
       - 1
-      # Both operands use regular Triton loads.
       - 3
     stages:
       - 2
@@ -73,8 +46,6 @@ mm_ppu:
       N: default
       K: default
 
-# Expanded search for skinny GEMMs.  The kernel fixes its physical M dot tile
-# at 16, so only N/K/load/pipeline dimensions are tunable.
 mm_ppu_small_m:
   - config:
     param_map:
@@ -114,8 +85,6 @@ mm_ppu_small_m:
       N: default
       K: default
 
-# Narrow N needs more output programs and the measured five-stage PPU
-# pipeline.  Keep this space separate so wide GEMMs do not pay for it.
 mm_ppu_narrow_n:
   - config:
     param_map:
@@ -126,8 +95,6 @@ mm_ppu_narrow_n:
         LOAD_MODE: load_mode
       num_stages: stages
       num_warps: warps
-    # Tall row tiles amortize column GEMM reductions once M spans multiple
-    # physical waves; pruning keeps these legal for smaller extents.
     block_m: [16, 32, 64, 128, 256, 512]
     block_n: [16, 32, 64]
     block_k: [32, 64, 128]
@@ -142,8 +109,6 @@ mm_ppu_narrow_n:
       N: default
       K: default
 
-# Expanded search for 16 < M < 32.  BLOCK_M stays at the single legal 32-row
-# tile so AABS and ConfigCache keep an identical schema.
 mm_ppu_mid_m:
   - config:
     param_map:
@@ -207,8 +172,6 @@ gemv_ppu:
       - 2
       - 3
     warps:
-      # Single-warp candidates are required for launch-bound singleton-column
-      # GEMV.  The resulting space is 7*7*3*2 = 294 candidates before pruning.
       - 1
       - 4
       - 8
@@ -259,9 +222,6 @@ mm_ppu_grouped_row_gemv:
       N: default
       K: default
 
-# Expanded split-K spaces retain the measured candidates and add nearby legal
-# tiles.  Each generated config list stays below 5,000 after legality
-# filtering; runtime pruning removes shape-incompatible contiguous slices.
 mm_ppu_split_k:
   - config:
     param_map:

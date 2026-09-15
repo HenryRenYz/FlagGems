@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Shared compile-time building blocks for THead PPU matrix multiplies."""
+"""Dispatch, pruning, and shared kernel helpers for THead PPU MM."""
 
 import math
 import os
@@ -139,12 +139,7 @@ def _ppu_reduction_bucket_strategy(value):
 def _is_deep_fixed_row(M: int, N: int, K: int) -> bool:
     """Return whether one BM32 row tile leaves fewer than one wave of work."""
     n_tiles = triton.cdiv(N, 64)
-    return (
-        K >= 4096
-        and M > 16
-        and triton.cdiv(M, 32) == 1
-        and 8 <= n_tiles <= _PPU_SMS
-    )
+    return K >= 4096 and M > 16 and triton.cdiv(M, 32) == 1 and 8 <= n_tiles <= _PPU_SMS
 
 
 def _latency_tile_width(N: int, K: int) -> int:
@@ -182,7 +177,9 @@ def _is_low_output_parallelism(M: int, N: int, K: int) -> bool:
     return latency_tiles <= _PPU_SMS or _is_deep_fixed_row(M, N, K)
 
 
-def _estimate_output_tiles(batch: int, M: int, N: int, block_m: int, block_n: int) -> int:
+def _estimate_output_tiles(
+    batch: int, M: int, N: int, block_m: int, block_n: int
+) -> int:
     """Estimate physical output programs for a candidate tile family."""
     return max(int(batch), 1) * triton.cdiv(M, block_m) * triton.cdiv(N, block_n)
 
@@ -240,9 +237,7 @@ def _prefer_deep_small_m_narrow(batch: int, M: int, N: int, K: int) -> bool:
         return False
     if N <= 0 or K < 4 * _GEMV_REDUCTION_TILE:
         return False
-    output_tiles = _estimate_output_tiles(
-        batch, M, N, _SMALL_M_TILE, 64
-    )
+    output_tiles = _estimate_output_tiles(batch, M, N, _SMALL_M_TILE, 64)
     return _PPU_SMS // 2 <= output_tiles <= _PPU_SMS
 
 
@@ -263,10 +258,7 @@ def _prefer_deep_mid_m(batch: int, M: int, N: int, K: int) -> bool:
         return False
     output_tiles = _estimate_output_tiles(batch, M, N, 32, 64)
     reduction_tiles = triton.cdiv(K, _GEMV_REDUCTION_TILE)
-    return (
-        16 <= output_tiles <= _PPU_SMS
-        and 3 <= reduction_tiles <= 4
-    )
+    return 16 <= output_tiles <= _PPU_SMS and 3 <= reduction_tiles <= 4
 
 
 def _prefer_grouped_mid_m(batch: int, M: int, N: int, K: int) -> bool:
@@ -388,8 +380,7 @@ def _should_use_grouped_row_gemv(M: int, N: int, K: int) -> bool:
     return (
         scalar_programs > 2 * _PPU_SMS
         and grouped_programs <= 128 * _PPU_SMS
-        and grouped_programs * triton.cdiv(K, _GEMV_REDUCTION_TILE)
-        <= 512 * _PPU_SMS
+        and grouped_programs * triton.cdiv(K, _GEMV_REDUCTION_TILE) <= 512 * _PPU_SMS
     )
 
 
@@ -470,32 +461,38 @@ def _split_k_wave_plan(batch: int, M: int, N: int, K: int):
         # A four-tile N=512 launch still benefits from split-K while its
         # physical row grid fits six BM64 tiles.  Beyond that boundary the
         # regular GEMM exposes enough work and split-K overhead dominates.
-        if not (
-            256 < N <= 512 and triton.cdiv(M, block_m) <= 6
-        ) and not (
-            256 < N <= 512
-            and triton.cdiv(M, block_m) <= 8
-            and 4 * _GEMV_REDUCTION_TILE <= K <= 7 * _GEMV_REDUCTION_TILE
-        ) and not (
-            16 * 128 <= N <= 17 * 128
-            and M <= 4 * 64
-            and K >= 7 * _GEMV_REDUCTION_TILE
-        ) and not (
-            20 * 128 <= N <= 21 * 128
-            and M <= 4 * 64
-            and K >= 4 * _GEMV_REDUCTION_TILE
-        ) and not (
-            16 * 16 <= N <= 2 * 128
-            and triton.cdiv(M, block_m) <= 8
-            and K >= 4 * _GEMV_REDUCTION_TILE
-        ) and not (
-            3 * 128 <= N < 4 * 128
-            and triton.cdiv(M, block_m) <= 8
-            and K >= 7 * _GEMV_REDUCTION_TILE
-        ) and not (
-            4 * 256 <= N < 5 * 256
-            and triton.cdiv(M, block_m) <= 8
-            and K >= 2 * _GEMV_REDUCTION_TILE
+        if (
+            not (256 < N <= 512 and triton.cdiv(M, block_m) <= 6)
+            and not (
+                256 < N <= 512
+                and triton.cdiv(M, block_m) <= 8
+                and 4 * _GEMV_REDUCTION_TILE <= K <= 7 * _GEMV_REDUCTION_TILE
+            )
+            and not (
+                16 * 128 <= N <= 17 * 128
+                and M <= 4 * 64
+                and K >= 7 * _GEMV_REDUCTION_TILE
+            )
+            and not (
+                20 * 128 <= N <= 21 * 128
+                and M <= 4 * 64
+                and K >= 4 * _GEMV_REDUCTION_TILE
+            )
+            and not (
+                16 * 16 <= N <= 2 * 128
+                and triton.cdiv(M, block_m) <= 8
+                and K >= 4 * _GEMV_REDUCTION_TILE
+            )
+            and not (
+                3 * 128 <= N < 4 * 128
+                and triton.cdiv(M, block_m) <= 8
+                and K >= 7 * _GEMV_REDUCTION_TILE
+            )
+            and not (
+                4 * 256 <= N < 5 * 256
+                and triton.cdiv(M, block_m) <= 8
+                and K >= 2 * _GEMV_REDUCTION_TILE
+            )
         ):
             return None
     # A partially populated physical row tile has insufficient independent
@@ -503,9 +500,7 @@ def _split_k_wave_plan(batch: int, M: int, N: int, K: int):
     # boundary follows the selected physical tile, so M moves continuously
     # into split-K once it can fill at least one row tile.
     if M < block_m and not (
-        32 <= M < block_m
-        and N >= 8 * 256
-        and K >= 4 * _GEMV_REDUCTION_TILE
+        32 <= M < block_m and N >= 8 * 256 and K >= 4 * _GEMV_REDUCTION_TILE
     ):
         return None
     # A partial row tile with a medium/wide output already has enough
@@ -564,9 +559,7 @@ def _configs_from_specs(specs, fields):
         num_stages = kwargs.pop("num_stages")
         kwargs["PIPE_STAGES"] = num_stages
         configs.append(
-            triton.Config(
-                kwargs, num_warps=num_warps, num_stages=num_stages
-            )
+            triton.Config(kwargs, num_warps=num_warps, num_stages=num_stages)
         )
     return configs
 
@@ -738,7 +731,6 @@ def _prune_gemm_configs(configs, named_args, **kwargs):
 
 def _prune_narrow_n_configs(configs, named_args, **kwargs):
     """Keep narrow-N candidates based only on legality/resource checks."""
-    N = named_args.get("N")
     aiu_load_mask = named_args.get("aiu_load_mask", _AIU_LOAD_A | _AIU_LOAD_B)
     filtered = []
     for config in configs:
@@ -848,11 +840,7 @@ if HAS_PPU_TLE:
                         is_async=True,
                     )
             else:
-                a_ptrs = (
-                    A
-                    + load_m[:, None] * stride_am
-                    + offs_k[None, :] * stride_ak
-                )
+                a_ptrs = A + load_m[:, None] * stride_am + offs_k[None, :] * stride_ak
                 # ``EVEN_M``/``EVEN_K`` describe logical extents, while the
                 # selected constexpr tile may be larger (for example M=32
                 # with BLOCK_M=64 or K divisible by 64 with BLOCK_K=128).
@@ -861,8 +849,10 @@ if HAS_PPU_TLE:
                 # a ragged candidate, test each iteration and predicate only
                 # its final partial K tile.  TLE descriptor loads above
                 # already perform equivalent boundary checks.
-                if (EVEN_M or FULL_M_TILES) and EVEN_K and (
-                    FULL_K_TILES or k_start + BLOCK_K <= K
+                if (
+                    (EVEN_M or FULL_M_TILES)
+                    and EVEN_K
+                    and (FULL_K_TILES or k_start + BLOCK_K <= K)
                 ):
                     a = tl.load(a_ptrs)
                 else:
@@ -884,17 +874,15 @@ if HAS_PPU_TLE:
                         is_async=True,
                     )
             else:
-                b_ptrs = (
-                    B
-                    + offs_k[:, None] * stride_bk
-                    + load_n[None, :] * stride_bn
-                )
+                b_ptrs = B + offs_k[:, None] * stride_bk + load_n[None, :] * stride_bn
                 # As above, keep complete K tiles on the unmasked path while
                 # guarding the final partial tile.  EVEN_N is a logical-shape
                 # hint and cannot prove divisibility by the selected BLOCK_N;
                 # the masked branch therefore checks both axes.
-                if EVEN_K and (EVEN_N or FULL_N_TILES) and (
-                    FULL_K_TILES or k_start + BLOCK_K <= K
+                if (
+                    EVEN_K
+                    and (EVEN_N or FULL_N_TILES)
+                    and (FULL_K_TILES or k_start + BLOCK_K <= K)
                 ):
                     b = tl.load(b_ptrs)
                 else:
@@ -907,11 +895,7 @@ if HAS_PPU_TLE:
 
         store_m = offs_m.to(tl.int64)
         store_n = offs_n.to(tl.int64)
-        c_ptrs = (
-            C
-            + store_m[:, None] * stride_cm
-            + store_n[None, :] * stride_cn
-        )
+        c_ptrs = C + store_m[:, None] * stride_cm + store_n[None, :] * stride_cn
         c_complete = (EVEN_M or FULL_M_TILES) and (EVEN_N or FULL_N_TILES)
         c_mask = (offs_m[:, None] < M) & (offs_n[None, :] < N)
         if FUSE_BIAS:

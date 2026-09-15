@@ -62,92 +62,11 @@ except ModuleNotFoundError as exc:
     )
 else:
     _HAS_FLAGTREE_FLAGTUNE = True
-    from triton.flagtune.runtime import (
-        benchmark_protocol as _triton_benchmark_protocol,
-    )
     from triton.flagtune.runtime.benchmark_protocol import (
         BenchmarkMode,
         BenchmarkProtocol,
+        resolve_benchmarker,
     )
-    from triton.runtime.driver import driver as _triton_driver
-
-    _triton_resolve_benchmarker = (
-        _triton_benchmark_protocol.resolve_benchmarker
-    )
-
-    def resolve_benchmarker(
-        mode,
-        *,
-        warmup_ms,
-        measurement_ms,
-        n_retries=10,
-        allow_fallback=True,
-    ):
-        """Resolve PPU replay before delegating to Triton's resolver.
-
-        Triton FlagTune may not advertise the vendor driver in its replay
-        registry even when the driver exposes the CUDA-compatible graph timing
-        API. Keep the backend-specific adaptation here so all LibTuner users,
-        including expanded tuning, receive the same replay protocol.
-        """
-        active = _triton_driver.active
-        replay_implementations = {
-            "triton.backends.ppu.driver": "triton_hggc_graph_replay_v1",
-        }
-        replay_implementation = replay_implementations.get(type(active).__module__)
-        if replay_implementation and BenchmarkMode(mode) is BenchmarkMode.REPLAY:
-            try:
-                from triton.testing import do_bench_cudagraph
-            except (ImportError, AttributeError):
-                # Keep Triton's event fallback when a PPU build does not ship
-                # the CUDA-compatible graph helper.
-                return _triton_resolve_benchmarker(
-                    mode,
-                    warmup_ms=warmup_ms,
-                    measurement_ms=measurement_ms,
-                    n_retries=n_retries,
-                    allow_fallback=allow_fallback,
-                )
-
-            try:
-                supports_retries = "n_retries" in inspect.signature(
-                    do_bench_cudagraph
-                ).parameters
-            except (TypeError, ValueError):
-                supports_retries = False
-            effective_retries = n_retries if supports_retries else 10
-            per_replay_ms = float(measurement_ms) / effective_retries
-
-            def replay_benchmark(kernel_call, quantiles):
-                kwargs = {
-                    "rep": per_replay_ms,
-                    "quantiles": quantiles,
-                }
-                if supports_retries:
-                    kwargs["n_retries"] = effective_retries
-                return do_bench_cudagraph(kernel_call, **kwargs)
-
-            protocol = BenchmarkProtocol(
-                requested_mode=BenchmarkMode.REPLAY,
-                resolved_mode=BenchmarkMode.REPLAY,
-                implementation=replay_implementation,
-                cache_policy="warm_l2",
-                warmup_ms=warmup_ms,
-                measurement_ms=measurement_ms,
-                n_retries=effective_retries,
-                per_replay_ms=per_replay_ms,
-            )
-            return _triton_benchmark_protocol.ResolvedBenchmarker(
-                protocol=protocol,
-                benchmark=replay_benchmark,
-            )
-        return _triton_resolve_benchmarker(
-            mode,
-            warmup_ms=warmup_ms,
-            measurement_ms=measurement_ms,
-            n_retries=n_retries,
-            allow_fallback=allow_fallback,
-        )
 
 from flag_gems import runtime
 from flag_gems.runtime import device, torch_device_fn
@@ -694,17 +613,8 @@ class LibTuner(triton.runtime.Autotuner):
             )
             return True
 
-        # Expanded is a strict extension of the production shortlist.  YAML
-        # spaces are usually Cartesian products and can otherwise omit sparse
-        # Pareto candidates such as asymmetric tiles or uncommon group sizes.
-        # Preserve YAML order while appending only missing default configs.
-        merged_configs = list(configs)
-        for config in self._flagtune_default_configs:
-            if config not in merged_configs:
-                merged_configs.append(config)
-
         self._set_configs_and_strategy(
-            merged_configs,
+            configs,
             expand_config["strategy"],
             mode=mode,
         )

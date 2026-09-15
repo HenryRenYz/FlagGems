@@ -341,7 +341,10 @@ def run_policy(
     intent = runtime.resolve_cost_model_intent(supports_cost_model=supports_cost_model)
     variant = getattr(self, "_flagtune_variant", None)
     disabled_key = (op_id, variant)
-    if intent is runtime.CostModelIntent.AUTO and disabled_key in _COST_MODEL_DISABLED_OPS:
+    if (
+        intent is runtime.CostModelIntent.AUTO
+        and disabled_key in _COST_MODEL_DISABLED_OPS
+    ):
         # Check before tensor inspection, candidate resolution or model loading.
         return legacy_fallback(self, bench_fn, args, kwargs, op_name)
     mode = runtime.resolve_tuning_mode(op_name, supports_cost_model=supports_cost_model)

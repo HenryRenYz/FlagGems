@@ -499,10 +499,15 @@ class TunedConfigLoader(object):
             "gemv",
             "gemv_ppu",
             "mm_ppu_multi_row_gemv",
+            "mm_ppu_narrow_columns",
             "gemv_k_parallel",
             "mm_w8a8_fp8_gemv",
         ):
-            ppu_gemv = op_name in ("gemv_ppu", "mm_ppu_multi_row_gemv")
+            ppu_gemv = op_name in (
+                "gemv_ppu",
+                "mm_ppu_multi_row_gemv",
+                "mm_ppu_narrow_columns",
+            )
             return [
                 triton.Config(
                     {
@@ -842,6 +847,12 @@ class TunedConfigLoader(object):
                 "default_strategy": ["default"] * 5,
                 "expand_yaml_path": None,
             },
+            "mm_ppu_narrow_columns": {
+                "yaml_op_name": "mm_ppu_narrow_columns",
+                "key": ["FUSE_ADDMM", "B_TRANSPOSED", "M", "N", "K"],
+                "default_strategy": ["default"] * 5,
+                "expand_yaml_path": None,
+            },
             "gemv_k_parallel": self._build_single_expand_spec(
                 "gemv", yaml_op_name="gemv_k_parallel"
             ),
@@ -1124,17 +1135,17 @@ class TunedConfigLoader(object):
             if not isinstance(expand_configs, list):
                 return -1
 
-            gen_config = None
+            gen_configs = []
             strategy_config = None
             for single_config in expand_configs:
                 if isinstance(single_config, dict) and "param_map" in single_config:
-                    gen_config = single_config
+                    gen_configs.append(single_config)
 
                 if isinstance(single_config, dict) and "strategy" in single_config:
                     strategy_config = single_config.get("strategy")
 
-            param_map = gen_config.get("param_map")
-            meta_map = param_map.get("META")
+            if not gen_configs:
+                return -1
 
             strategy = default_strategy
             if isinstance(strategy_config, dict):
@@ -1143,20 +1154,26 @@ class TunedConfigLoader(object):
                     for idx, k in enumerate(key)
                 ]
 
-            ranges = {}
-
-            for mapped_key in meta_map.values():
-                ranges[mapped_key.upper()] = gen_config[mapped_key]
-            ranges["s"] = gen_config[param_map.get("num_stages")]
-            ranges["w"] = gen_config[param_map.get("num_warps")]
-            if "maxnreg" in param_map:
-                ranges["maxnreg"] = gen_config[param_map["maxnreg"]]
+            config_spaces = []
+            for gen_config in gen_configs:
+                param_map = gen_config.get("param_map")
+                meta_map = param_map.get("META")
+                ranges = {}
+                for mapped_key in meta_map.values():
+                    ranges[mapped_key.upper()] = gen_config[mapped_key]
+                ranges["s"] = gen_config[param_map.get("num_stages")]
+                ranges["w"] = gen_config[param_map.get("num_warps")]
+                if "maxnreg" in param_map:
+                    ranges["maxnreg"] = gen_config[param_map["maxnreg"]]
+                config_spaces.append(ranges)
 
             return {
-                "ranges": ranges,
+                "ranges": config_spaces[0],
+                "config_spaces": config_spaces,
                 "strategy": strategy,
-                "include_default_configs": bool(
-                    gen_config.get("include_default_configs", False)
+                "include_default_configs": any(
+                    bool(config.get("include_default_configs", False))
+                    for config in gen_configs
                 ),
             }
         except Exception:
@@ -1166,10 +1183,6 @@ class TunedConfigLoader(object):
         expand_config = self.get_expand_config(op_name, yaml_path=yaml_path)
         if expand_config == -1:
             return []
-        ranges = expand_config["ranges"]
-        configs = self._build_configs_by_op(op_name, ranges, pre_hook=pre_hook)
-        if not expand_config["include_default_configs"]:
-            return configs
 
         def config_key(config):
             return (
@@ -1183,7 +1196,18 @@ class TunedConfigLoader(object):
                 repr(getattr(config, "ir_override", None)),
             )
 
-        seen = {config_key(config) for config in configs}
+        configs = []
+        seen = set()
+        for ranges in expand_config.get("config_spaces", [expand_config["ranges"]]):
+            for config in self._build_configs_by_op(op_name, ranges, pre_hook=pre_hook):
+                key = config_key(config)
+                if key in seen:
+                    continue
+                configs.append(config)
+                seen.add(key)
+        if not expand_config["include_default_configs"]:
+            return configs
+
         for default_config in self.get_tuned_config(op_name):
             key = config_key(default_config)
             if key in seen:

@@ -421,6 +421,8 @@ def _ppu_narrow_n_configs():
     deep_n_specs = (
         (32, 32, 256, 4, 3, _LOAD_BOTH_AIU),
         (32, 32, 256, 4, 4, _LOAD_BOTH_AIU),
+        (32, 32, 256, 4, 3, _LOAD_A_AIU),
+        (32, 32, 256, 4, 4, _LOAD_A_AIU),
     )
     return _configs_from_specs(
         (*specs, *deep_n_specs, row_vector_spec),

@@ -334,18 +334,6 @@ class Benchmark:
             end = time.time()
             latency = (end - start) / n_rep * 1000
         elif Config.mode == consts.BenchMode.CUDAGRAPH:
-            # PPU's ``do_bench_cudagraph`` accepts only the replay duration
-            # and performs a fixed one-call warmup internally.  Honor the
-            # benchmark CLI's warmup duration explicitly before graph capture
-            # so ``--warmup`` is an executed setting rather than metadata only.
-            if vendor_name == "thead" and Config.warm_up > 0:
-                triton.testing.do_bench(
-                    fn,
-                    warmup=Config.warm_up,
-                    rep=1,
-                    return_mode="median",
-                    grad_to_none=xs if self.is_backward else None,
-                )
             do_bench_cudagraph = triton.testing.do_bench_cudagraph
             latency = do_bench_cudagraph(
                 fn,

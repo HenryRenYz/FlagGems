@@ -254,9 +254,7 @@ def write_outputs(
             )
             handle.write("\n")
 
-    include_recipe_id = any(
-        str(row.get("recipe_id", "")).strip() for row in rows
-    )
+    include_recipe_id = any(str(row.get("recipe_id", "")).strip() for row in rows)
     include_route_metadata = any(
         row.get("route") is not None or row.get("model_inputs") is not None
         for row in rows

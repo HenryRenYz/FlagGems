@@ -75,6 +75,7 @@ def platform_model_package_available() -> bool:
     """
     try:
         from triton.flagtune.runtime.errors import ModelUnavailableError
+
         missing_errors = (FileNotFoundError, ModelUnavailableError)
     except ImportError:
         missing_errors = (FileNotFoundError,)

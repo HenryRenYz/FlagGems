@@ -335,10 +335,9 @@ def prepare_benchmark_case(
         raise BenchmarkExecutionError(
             f"case[{task_index}] has unknown variant {variant!r}"
         )
-    if (
-        raw.get("variant_source") != "planner"
-        and not spec.operator_info.variants[variant].matches(values)
-    ):
+    if raw.get("variant_source") != "planner" and not spec.operator_info.variants[
+        variant
+    ].matches(values):
         raise BenchmarkExecutionError(
             f"case[{task_index}] shape is ineligible for variant {variant!r}"
         )
@@ -630,13 +629,17 @@ class BenchmarkWorker:
                 raise BenchmarkExecutionError(
                     f"transposed_2d tensor {tensor.name!r} requires a two-dimensional shape"
                 )
-            allocation_shape = tuple(reversed(shape)) if layout == "transposed_2d" else shape
+            allocation_shape = (
+                tuple(reversed(shape)) if layout == "transposed_2d" else shape
+            )
             value = self.device_runtime.make_tensor(
                 tensor.factory,
                 allocation_shape,
                 dtype=dtype_by_tensor[tensor.name],
             )
-            tensors[tensor.name] = value.transpose(0, 1) if layout == "transposed_2d" else value
+            tensors[tensor.name] = (
+                value.transpose(0, 1) if layout == "transposed_2d" else value
+            )
         return tensors
 
     def _invoke(self, tensors: Mapping[str, Any], variant: str) -> Any:
@@ -1116,7 +1119,10 @@ class BenchmarkWorker:
                 if name in {"P", "C"} and hasattr(value, "dtype"):
                     partial_value = value
                     break
-            if partial_value is not None and normalize_dtype_name(partial_value.dtype) != "float32":
+            if (
+                partial_value is not None
+                and normalize_dtype_name(partial_value.dtype) != "float32"
+            ):
                 raise BenchmarkExecutionError(
                     f"partial workspace must be FP32, got {partial_value.dtype}"
                 )
@@ -1167,9 +1173,7 @@ class BenchmarkWorker:
             "route_variant": route_meta.get("route_variant", variant),
             "tuning_variant": route_meta.get("tuning_variant", variant),
             "stage": route_meta.get("stage", "public"),
-            "latency_scope": route_meta.get(
-                "latency_scope", "public_kernel"
-            ),
+            "latency_scope": route_meta.get("latency_scope", "public_kernel"),
             "shape": shape,
             "shape_key": ",".join(str(value) for value in shape),
             **values,
@@ -1274,9 +1278,7 @@ class BenchmarkWorker:
             "route_variant": route_meta.get("route_variant", variant),
             "tuning_variant": route_meta.get("tuning_variant", variant),
             "stage": route_meta.get("stage", "public"),
-            "latency_scope": route_meta.get(
-                "latency_scope", "public_kernel"
-            ),
+            "latency_scope": route_meta.get("latency_scope", "public_kernel"),
             "shape": shape,
             "shape_key": ",".join(str(value) for value in shape),
             **values,

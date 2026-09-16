@@ -847,13 +847,19 @@ def _parse_benchmark(
                 f"{location}.tensors.{name} supports only dtype=runtime"
             )
         try:
-            layout = compile_expression(
-                tensor.get("layout", {"literal": "contiguous"}),
-                symbols=set(shape.fields),
-                operations={},
-                location=f"{location}.tensors.{name}.layout",
-                allow_calls=False,
-            )
+            raw_layout = tensor.get("layout", {"literal": "contiguous"})
+            # Older FlagTree parsers reject literal mappings with allow_calls=False.
+            # Construct layout literals directly; the allowlist below validates them.
+            if isinstance(raw_layout, Mapping) and set(raw_layout) == {"literal"}:
+                layout = Literal(raw_layout["literal"])
+            else:
+                layout = compile_expression(
+                    raw_layout,
+                    symbols=set(shape.fields),
+                    operations={},
+                    location=f"{location}.tensors.{name}.layout",
+                    allow_calls=False,
+                )
         except SafeExpressionError as exc:
             raise OperatorConfigError(str(exc)) from exc
         if isinstance(layout, SymbolRef):
@@ -867,7 +873,11 @@ def _parse_benchmark(
                     f"{location}.tensors.{name}.layout field must be a string "
                     f"with choices drawn from {sorted(_TENSOR_LAYOUTS)}"
                 )
-        elif not isinstance(layout, Literal) or layout.value not in _TENSOR_LAYOUTS:
+        elif (
+            not isinstance(layout, Literal)
+            or not isinstance(layout.value, str)
+            or layout.value not in _TENSOR_LAYOUTS
+        ):
             raise OperatorConfigError(
                 f"{location}.tensors.{name}.layout must be one of "
                 f"{sorted(_TENSOR_LAYOUTS)}"

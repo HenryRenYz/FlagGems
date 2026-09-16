@@ -238,13 +238,9 @@ def _index_rows(
         else:
             key = str(raw_key).strip()
             if not key:
-                raise ComparisonError(
-                    f"{label} row {row_number} has empty {key_field}"
-                )
+                raise ComparisonError(f"{label} row {row_number} has empty {key_field}")
         if key in indexed:
-            raise ComparisonError(
-                f"{label} CSV has duplicate {key_field} {raw_key}"
-            )
+            raise ComparisonError(f"{label} CSV has duplicate {key_field} {raw_key}")
         indexed[key] = row
     return indexed
 
@@ -353,9 +349,7 @@ def compare_rows(
         and all(str(row.get("recipe_id", "")).strip() for row in ours_rows)
     )
     join_field = "recipe_id" if use_recipe_id else "input_row_index"
-    copy_columns = _copy_columns(
-        baseline_dimensions, include_recipe_id=use_recipe_id
-    )
+    copy_columns = _copy_columns(baseline_dimensions, include_recipe_id=use_recipe_id)
     baseline_rows, baseline_fields = _normalize_schema(baseline_rows, baseline_fields)
     ours_rows, ours_fields = _normalize_schema(ours_rows, ours_fields)
     protocol_aware = _validate_protocol_schemas(baseline_fields, ours_fields)
@@ -394,9 +388,10 @@ def compare_rows(
         baseline_latency = _parse_metric(baseline, latency_column)
         ours_latency = _parse_metric(ours, latency_column)
 
-        planned_skip = baseline.get("status") in {"skipped", "planned_skip"} and ours.get(
-            "status"
-        ) in {"skipped", "planned_skip"}
+        planned_skip = baseline.get("status") in {
+            "skipped",
+            "planned_skip",
+        } and ours.get("status") in {"skipped", "planned_skip"}
         shared_errors = []
         if baseline.get("status") != "ok":
             shared_errors.append(f"baseline status is {baseline.get('status')!r}")

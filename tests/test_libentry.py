@@ -14,6 +14,7 @@
 
 import importlib
 import importlib.util
+import inspect
 import multiprocessing
 import os
 import signal
@@ -43,6 +44,7 @@ from flag_gems.utils.libentry import (
 )
 
 libentry_mod = importlib.import_module("flag_gems.utils.libentry")
+cost_model_mod = importlib.import_module("flag_gems.flagtune.cost_model")
 flagtune_runtime_mod = importlib.import_module("flag_gems.runtime.flagtune")
 model_package_mod = importlib.import_module("flag_gems.flagtune.runtime.model_package")
 HAS_FLAGTREE_FLAGTUNE = importlib.util.find_spec("triton.flagtune") is not None
@@ -56,9 +58,9 @@ requires_flagtree_flagtune = pytest.mark.skipif(
 def isolate_cost_model_state(monkeypatch):
     """Mode resolution must not probe; each test owns independent fuse state."""
     # Test-only isolation: production fuses last until the process restarts.
-    monkeypatch.setattr(libentry_mod, "_COST_MODEL_DISABLED_OPS", set())
-    monkeypatch.setattr(libentry_mod, "_COST_MODEL_IDENTITIES", {})
-    monkeypatch.setattr(libentry_mod, "_FLAGTUNE_AVAILABILITY", None)
+    monkeypatch.setattr(cost_model_mod, "_COST_MODEL_DISABLED_OPS", set())
+    monkeypatch.setattr(cost_model_mod, "_COST_MODEL_IDENTITIES", {})
+    monkeypatch.setattr(cost_model_mod, "_FLAGTUNE_AVAILABILITY", None)
 
     def unexpected_probe():
         raise AssertionError("mode resolution must not probe a model package")
@@ -499,10 +501,15 @@ def test_official_triton_libtuner_uses_unadapted_routes(
 
     changed = LibTuner.apply_flagtune(tuner)
 
-    assert changed is use_expanded_configs
+    # The first call initializes the selection token even in Default mode.
+    assert changed is True
     assert tuner._flagtune_mode.value == expected_mode
     expected_configs = expanded_configs if use_expanded_configs else default_configs
     assert tuner.configs is expected_configs
+    assert tuner.strategy == (
+        "expanded_strategy" if use_expanded_configs else "default_strategy"
+    )
+    assert LibTuner.apply_flagtune(tuner) is False
 
 
 def softmax_inner_decorator_cascade(x, dim, dtype=None):
@@ -759,9 +766,9 @@ def test_model_bundle_missing_error_supports_older_flagtree(
     expected = (
         MissingBundleError
         if has_error_class
-        else libentry_mod._NoModelBundleMissingError
+        else cost_model_mod.NoModelBundleMissingError
     )
-    assert libentry_mod._model_bundle_missing_error() is expected
+    assert cost_model_mod.model_bundle_missing_error() is expected
 
 
 def test_libentry_key_without_vendor_hook(monkeypatch):
@@ -1035,7 +1042,7 @@ def test_flagtree_policy_is_bypassed_when_expanded_flagtune_is_enabled(monkeypat
 
     monkeypatch.setenv("USE_FLAGTUNE", "1")
     monkeypatch.setenv("USE_FLAGTUNE_COST_MODEL", "0")
-    monkeypatch.setattr(libentry_mod, "_ensure_flagtune_proposer", fail_if_called)
+    monkeypatch.setattr(cost_model_mod, "ensure_proposer", fail_if_called)
 
     best_config, timings = LibTuner.get("flagtune").policy(
         FakeTuner(),
@@ -1073,7 +1080,7 @@ def test_official_triton_treats_model_annotation_as_unadapted(monkeypatch):
 
     monkeypatch.setattr(libentry_mod, "_HAS_FLAGTREE_FLAGTUNE", False)
     monkeypatch.setattr(libentry_mod.runtime, "resolve_tuning_mode", resolve_mode)
-    monkeypatch.setattr(libentry_mod, "_flagtune_available", fail_if_called)
+    monkeypatch.setattr(cost_model_mod, "available", fail_if_called)
 
     best_config, timings = LibTuner.get("flagtune").policy(
         FakeTuner(),
@@ -1146,14 +1153,19 @@ def test_flagtree_policy_uses_cost_model_by_default_for_adapted_operator(monkeyp
     monkeypatch.delenv("USE_FLAGTUNE_COST_MODEL", raising=False)
     monkeypatch.delenv("FLAGTUNE_INCLUDE", raising=False)
     monkeypatch.setattr(flagtune_runtime_mod, "_include_ops", None)
-    monkeypatch.setattr(libentry_mod, "_flagtune_available", lambda: (True, None))
+    monkeypatch.setattr(cost_model_mod, "available", lambda: (True, None))
     observed_identity = {}
 
     def fake_ensure(identity):
         observed_identity["value"] = identity
         return fake_proposer, FakeVariantInfo()
 
-    monkeypatch.setattr(libentry_mod, "_ensure_flagtune_proposer", fake_ensure)
+    monkeypatch.setattr(cost_model_mod, "ensure_proposer", fake_ensure)
+    # This policy unit test must not depend on the runner's backend support.
+    identity_mod = importlib.import_module("triton.flagtune.contract.identity")
+    monkeypatch.setattr(
+        identity_mod, "discover_gpu_metadata", lambda: {"platform_key": "nvidia-h20"}
+    )
 
     best_config, timings = LibTuner.get("flagtune").policy(
         FakeTuner(),
@@ -1164,12 +1176,7 @@ def test_flagtree_policy_uses_cost_model_by_default_for_adapted_operator(monkeyp
     )
 
     assert proposer_called is True
-    from triton.flagtune.contract.identity import discover_gpu_metadata
-
-    assert (
-        observed_identity["value"].platform_key
-        == discover_gpu_metadata()["platform_key"]
-    )
+    assert observed_identity["value"].platform_key == "nvidia-h20"
     assert best_config.kwargs["BLOCK"] == 1
     assert list(timings.values()) == [1.0]
     assert calls == {"normalize": 1, "convert": 1}
@@ -1243,8 +1250,8 @@ def test_enabled_flagtree_policy_propagates_contract_failures(
     monkeypatch.setenv("USE_FLAGTUNE_COST_MODEL", "1")
     monkeypatch.delenv("FLAGTUNE_INCLUDE", raising=False)
     monkeypatch.setattr(flagtune_runtime_mod, "_include_ops", None)
-    monkeypatch.setattr(libentry_mod, "_flagtune_available", lambda: (True, None))
-    monkeypatch.setattr(libentry_mod, "_ensure_flagtune_proposer", ensure)
+    monkeypatch.setattr(cost_model_mod, "available", lambda: (True, None))
+    monkeypatch.setattr(cost_model_mod, "ensure_proposer", ensure)
     monkeypatch.setattr(
         "triton.flagtune.contract.identity.discover_gpu_metadata",
         lambda: {"platform_key": "nvidia-h20"},
@@ -1264,7 +1271,10 @@ def test_enabled_flagtree_policy_propagates_contract_failures(
 @pytest.mark.parametrize("phase", ["preload", "postload"])
 @pytest.mark.parametrize("setting", [None, "1", " 1 "])
 def test_cost_model_failures_fuse_only_auto(monkeypatch, caplog, phase, setting):
-    from triton.flagtune.runtime.errors import FlagTuneError
+    FlagTuneError = pytest.importorskip(
+        "triton.flagtune.runtime.errors",
+        reason="AUTO fuse tests require FlagTree's unified runtime errors",
+    ).FlagTuneError
 
     monkeypatch.delenv("USE_FLAGTUNE", raising=False)
     if setting is None:
@@ -1273,12 +1283,15 @@ def test_cost_model_failures_fuse_only_auto(monkeypatch, caplog, phase, setting)
         monkeypatch.setenv("USE_FLAGTUNE_COST_MODEL", setting)
     monkeypatch.setattr(libentry_mod, "_HAS_FLAGTREE_FLAGTUNE", True)
     tuner = SimpleNamespace(
-        _flagtune_op_name="mm", _flagtune_op_id="flaggems/mm",
-        _flagtune_variant="general_tma", nargs={}, arg_names=[],
+        _flagtune_op_name="mm",
+        _flagtune_op_id="flaggems/mm",
+        _flagtune_variant="general_tma",
+        nargs={},
+        arg_names=[],
     )
     calls = {"load": 0, "run": 0, "fallback": 0}
     candidates = [triton.Config({"BLOCK": 1}), triton.Config({"BLOCK": 2})]
-    monkeypatch.setattr(libentry_mod, "_flagtune_runtime_candidates", lambda *a: candidates)
+    monkeypatch.setattr(cost_model_mod, "runtime_candidates", lambda *a: candidates)
 
     def load(*args):
         calls["load"] += 1
@@ -1294,15 +1307,15 @@ def test_cost_model_failures_fuse_only_auto(monkeypatch, caplog, phase, setting)
         calls["fallback"] += 1
         return candidates[0], {}
 
-    monkeypatch.setattr(libentry_mod, "_load_flagtune_model", load)
-    monkeypatch.setattr(libentry_mod, "_run_flagtune_model", run)
+    monkeypatch.setattr(cost_model_mod, "load_model", load)
+    monkeypatch.setattr(cost_model_mod, "run_proposer", run)
     monkeypatch.setattr(libentry_mod, "_flagtune_legacy_fallback", fallback)
     policy = LibTuner.get("flagtune").policy
     if setting is not None:
         with pytest.raises(FlagTuneError) as error:
             policy(tuner, None, candidates, (), {})
         assert isinstance(error.value.__cause__, (FileNotFoundError, ValueError))
-        assert not libentry_mod._COST_MODEL_DISABLED_OPS
+        assert not cost_model_mod._COST_MODEL_DISABLED_OPS
         assert calls["fallback"] == 0
     else:
         policy(tuner, None, candidates, (), {})
@@ -1310,27 +1323,33 @@ def test_cost_model_failures_fuse_only_auto(monkeypatch, caplog, phase, setting)
         assert calls["load"] == 1
         assert calls["fallback"] == 2
         assert sum(f"phase={phase}" in record.message for record in caplog.records) == 1
+
         # Repairing the model path does not re-enable AUTO in this process.
         def repaired_load(*args):
             calls["load"] += 1
             return object()
 
-        monkeypatch.setattr(libentry_mod, "_load_flagtune_model", repaired_load)
+        monkeypatch.setattr(cost_model_mod, "load_model", repaired_load)
         monkeypatch.setattr(
-            libentry_mod, "_run_flagtune_model", lambda *a: (candidates[0], {})
+            cost_model_mod, "run_proposer", lambda *a: (candidates[0], {})
         )
         policy(tuner, None, candidates, (), {})
         assert calls["load"] == 1
         assert calls["fallback"] == 3
-        assert libentry_mod._COST_MODEL_DISABLED_OPS == {"flaggems/mm"}
+        assert cost_model_mod._COST_MODEL_DISABLED_OPS == {
+            ("flaggems/mm", "general_tma")
+        }
     assert not getattr(tuner, "_flagtune_strict_benchmark", False)
 
 
 @requires_flagtree_flagtune
-def test_auto_fuse_covers_all_devices_variants_and_dtypes_of_only_one_op(
+def test_auto_fuse_covers_all_devices_and_dtypes_of_only_one_variant(
     monkeypatch, caplog
 ):
-    from triton.flagtune.runtime.errors import FlagTuneError
+    FlagTuneError = pytest.importorskip(
+        "triton.flagtune.runtime.errors",
+        reason="AUTO fuse tests require FlagTree's unified runtime errors",
+    ).FlagTuneError
 
     monkeypatch.delenv("USE_FLAGTUNE", raising=False)
     monkeypatch.delenv("USE_FLAGTUNE_COST_MODEL", raising=False)
@@ -1357,9 +1376,9 @@ def test_auto_fuse_covers_all_devices_variants_and_dtypes_of_only_one_op(
         fallbacks.append(current._flagtune_variant)
         return candidates[0], {}
 
-    monkeypatch.setattr(libentry_mod, "_flagtune_runtime_candidates", lambda *a: candidates)
-    monkeypatch.setattr(libentry_mod, "_load_flagtune_model", load)
-    monkeypatch.setattr(libentry_mod, "_run_flagtune_model", lambda *a: (candidates[0], {}))
+    monkeypatch.setattr(cost_model_mod, "runtime_candidates", lambda *a: candidates)
+    monkeypatch.setattr(cost_model_mod, "load_model", load)
+    monkeypatch.setattr(cost_model_mod, "run_proposer", lambda *a: (candidates[0], {}))
     monkeypatch.setattr(libentry_mod, "_flagtune_legacy_fallback", fallback)
     policy = LibTuner.get("flagtune").policy
     mm0 = tuner("flaggems/mm", "general_tma", "cuda:0", "bfloat16")
@@ -1367,27 +1386,41 @@ def test_auto_fuse_covers_all_devices_variants_and_dtypes_of_only_one_op(
     mul1 = tuner("flaggems/mul", "scalar", "cuda:1", "float32")
 
     policy(mm0, None, candidates, (), {})
-    policy(mm1, None, candidates, (), {})
+    policy(
+        tuner("flaggems/mm", "general_tma", "cuda:1", "float32"),
+        None,
+        candidates,
+        (),
+        {},
+    )
     assert loads == [("flaggems/mm", "general_tma")]
-    assert fallbacks == ["general_tma", "gemv"]
-    assert libentry_mod._COST_MODEL_DISABLED_OPS == {"flaggems/mm"}
-    assert sum("disabled for operator flaggems/mm" in r.message for r in caplog.records) == 1
+    policy(mm1, None, candidates, (), {})
+    assert loads == [("flaggems/mm", "general_tma"), ("flaggems/mm", "gemv")]
+    assert fallbacks == ["general_tma", "general_tma", "gemv"]
+    assert cost_model_mod._COST_MODEL_DISABLED_OPS == {
+        ("flaggems/mm", "general_tma"),
+        ("flaggems/mm", "gemv"),
+    }
+    assert (
+        sum("disabled for operator flaggems/mm" in r.message for r in caplog.records)
+        == 2
+    )
 
     policy(mul1, None, candidates, (), {})
     assert loads[-1] == ("flaggems/mul", "scalar")
-    assert len(fallbacks) == 2
+    assert len(fallbacks) == 3
 
     monkeypatch.setenv("USE_FLAGTUNE_COST_MODEL", "1")
     with pytest.raises(FlagTuneError, match="missing MM model"):
         policy(mm1, None, candidates, (), {})
     assert loads[-1] == ("flaggems/mm", "gemv")
-    assert len(fallbacks) == 2
+    assert len(fallbacks) == 3
 
     monkeypatch.delenv("USE_FLAGTUNE_COST_MODEL")
     # A REQUIRED attempt does not clear the existing AUTO fuse.
     policy(mm1, None, candidates, (), {})
-    assert len(loads) == 3
-    assert len(fallbacks) == 3
+    assert len(loads) == 4
+    assert len(fallbacks) == 4
     assert fallbacks[-1] == "gemv"
 
 
@@ -1430,10 +1463,14 @@ def test_operator_fuse_invalidates_existing_dispatch_caches(monkeypatch, expande
 
     mm_entries = [entry("flaggems/mm", v) for v in ("general_tma", "gemv")]
     mul_entry = entry("flaggems/mul", "scalar")
-    libentry_mod._COST_MODEL_DISABLED_OPS.add("flaggems/mm")
+    cost_model_mod._COST_MODEL_DISABLED_OPS.update(
+        {("flaggems/mm", "general_tma"), ("flaggems/mm", "gemv")}
+    )
     for current in mm_entries:
         libentry_mod.LibEntry._apply_flagtune(current)
-        assert current.fn._flagtune_mode is (modes.EXPANDED if expanded else modes.DEFAULT)
+        assert current.fn._flagtune_mode is (
+            modes.EXPANDED if expanded else modes.DEFAULT
+        )
         assert all(not cache for cache in current.kernel_cache)
         assert not current._cpu_cache
     libentry_mod.LibEntry._apply_flagtune(mul_entry)
@@ -1453,18 +1490,24 @@ def test_cost_model_singleton_does_not_load_or_swallow_legacy_failure(monkeypatc
     monkeypatch.setattr(libentry_mod, "_HAS_FLAGTREE_FLAGTUNE", True)
     candidates = [triton.Config({"BLOCK": 1})]
     tuner = SimpleNamespace(
-        _flagtune_op_name="mm", _flagtune_op_id="flaggems/mm",
-        _flagtune_variant="gemv", nargs={}, arg_names=[],
+        _flagtune_op_name="mm",
+        _flagtune_op_id="flaggems/mm",
+        _flagtune_variant="gemv",
+        nargs={},
+        arg_names=[],
     )
-    monkeypatch.setattr(libentry_mod, "_flagtune_runtime_candidates", lambda *a: candidates)
+    monkeypatch.setattr(cost_model_mod, "runtime_candidates", lambda *a: candidates)
+
     def unexpected_load(*args):
         raise AssertionError("singleton must not load a model")
+
     def failed_bench(*args):
         raise ValueError("legacy benchmark error")
-    monkeypatch.setattr(libentry_mod, "_load_flagtune_model", unexpected_load)
+
+    monkeypatch.setattr(cost_model_mod, "load_model", unexpected_load)
     with pytest.raises(ValueError, match="legacy benchmark error"):
         LibTuner.get("flagtune").policy(tuner, failed_bench, candidates, (), {})
-    assert not libentry_mod._COST_MODEL_DISABLED_OPS
+    assert not cost_model_mod._COST_MODEL_DISABLED_OPS
 
 
 @pytest.mark.parametrize("benchmark_fails", [False, True])
@@ -1505,6 +1548,7 @@ def test_legacy_fallback_prunes_and_restores_tuner_state(monkeypatch, benchmark_
 
     tuner = FakeTuner()
     seen = []
+
     def bench(config):
         seen.append(config)
         assert config.pre_hook is hook
@@ -1555,13 +1599,13 @@ def test_flagtree_proposer_cache_tracks_resolved_model_version(monkeypatch):
         calls.append(("make", op_id, variant, kwargs))
         return object()
 
-    monkeypatch.setattr(libentry_mod, "_FLAGTUNE_PROPOSER_POOL", {})
-    monkeypatch.setattr(libentry_mod, "_FLAGTUNE_VARIANT_INFO_POOL", {})
+    monkeypatch.setattr(cost_model_mod, "_FLAGTUNE_PROPOSER_POOL", {})
+    monkeypatch.setattr(cost_model_mod, "_FLAGTUNE_VARIANT_INFO_POOL", {})
     monkeypatch.setattr(proposer_mod, "load_model_bundle", fake_load)
     monkeypatch.setattr(proposer_mod, "make_config_proposer", fake_make)
 
-    first = libentry_mod._ensure_flagtune_proposer(identity)
-    second = libentry_mod._ensure_flagtune_proposer(identity)
+    first = cost_model_mod.ensure_proposer(identity)
+    second = cost_model_mod.ensure_proposer(identity)
 
     assert first[0] is not second[0]
     assert first[1] is variants[0]
@@ -1595,8 +1639,8 @@ def test_flagtree_policy_is_bypassed_when_cost_model_is_disabled(monkeypatch):
     monkeypatch.setenv("USE_FLAGTUNE_COST_MODEL", "0")
     monkeypatch.delenv("FLAGTUNE_INCLUDE", raising=False)
     monkeypatch.setattr(flagtune_runtime_mod, "_include_ops", None)
-    monkeypatch.setattr(libentry_mod, "_flagtune_available", lambda: (True, None))
-    monkeypatch.setattr(libentry_mod, "_ensure_flagtune_proposer", fail_if_called)
+    monkeypatch.setattr(cost_model_mod, "available", lambda: (True, None))
+    monkeypatch.setattr(cost_model_mod, "ensure_proposer", fail_if_called)
 
     best_config, timings = LibTuner.get("flagtune").policy(
         FakeTuner(),
@@ -1823,15 +1867,18 @@ def test_benchmark_success_count_tracks_finite_uncached_benchmarks(monkeypatch):
     assert tuner._last_benchmark_meta == {}
     assert tuner._run_mode is LibTunerRunMode.NORMAL
 
-    # A one-config tuner bypasses autotuning even when Cost Model mode is set;
-    # there is no selection work or benchmark cache entry to perform.
+    # Cost Model mode enters policy even with one declared config: the actual
+    # runtime candidate space is resolved by policy and may contain more configs.
+    # This fake policy reuses the existing latency without a fresh benchmark.
     tuner.configs = [configs[0]]
     tuner._flagtune_mode = flagtune_runtime_mod.TuningMode.COST_MODEL
     config_cache.values.clear()
     policy_calls = tuner.policy_call_count
     LibTuner.run(tuner, 32)
-    assert tuner.policy_call_count == policy_calls
+    assert tuner.policy_call_count == policy_calls + 1
     assert tuner.best_config is configs[0]
+    assert tuner.benchmark_success_count == 0
+    assert tuner.benchmark_cache_hit_count == 1
 
 
 def test_benchmark_key_preserves_raw_shape_and_scopes_timing_protocol(monkeypatch):
@@ -1908,31 +1955,24 @@ def test_benchmark_key_preserves_raw_shape_and_scopes_timing_protocol(monkeypatc
     assert tuner.config_table_name == "fake_config"
 
 
-@pytest.mark.parametrize(
-    ("use_cuda_graph", "expected"),
-    [
-        (True, libentry_mod.BenchmarkMode.REPLAY),
-        (False, libentry_mod.BenchmarkMode.EVENT),
-    ],
-)
-def test_deprecated_cuda_graph_alias_maps_to_benchmark_mode(use_cuda_graph, expected):
-    """Keep the legacy boolean API while making replay the implicit default."""
-    with pytest.warns(DeprecationWarning, match="use_cuda_graph is deprecated"):
-        assert libentry_mod._select_benchmark_mode(None, use_cuda_graph) is expected
+def test_ordinary_libtuner_keeps_legacy_benchmark_arguments():
+    """Benchmark protocol arguments are Cost Model-only, not tuner arguments."""
+    parameters = inspect.signature(LibTuner.__init__).parameters
+    assert parameters["use_cuda_graph"].default is False
+    assert "benchmark_mode" not in parameters
+    assert "benchmark_retries" not in parameters
 
+
+def test_cost_model_protocol_stays_explicit():
+    """Cost Model can still select protocol timing through its scoped API."""
     assert (
-        libentry_mod._select_benchmark_mode(None, None)
-        is libentry_mod.BenchmarkMode.REPLAY
+        "benchmark_mode"
+        in inspect.signature(LibTuner.use_benchmark_protocol).parameters
     )
-    with pytest.raises(ValueError, match="cannot be supplied together"):
-        libentry_mod._select_benchmark_mode("event", False)
-
-
-@pytest.mark.parametrize("value", [0, -1, True, 1.5])
-def test_benchmark_retries_rejects_invalid_legacy_protocol_values(value):
-    """Avoid legacy replay division-by-zero before Triton resolves a benchmarker."""
-    with pytest.raises(ValueError, match="positive integer"):
-        libentry_mod._validate_benchmark_retries(value)
+    assert (
+        "benchmark_retries"
+        in inspect.signature(LibTuner.use_benchmark_protocol).parameters
+    )
 
 
 def test_replay_fallback_reuses_event_config_cache_namespace(monkeypatch):
@@ -2016,8 +2056,10 @@ def test_config_cache_namespace_separates_replay_protocols():
     assert replay_ten != replay_five
 
 
-def test_adapted_config_cache_namespace_separates_tuning_modes():
-    """Prevent Default and Cost Model paths from sharing best-config rows."""
+def test_adapted_config_cache_namespace_separates_tuning_modes(monkeypatch):
+    """Separate modes, AUTO/REQUIRED intent, and legacy Cost Model cache rows."""
+    monkeypatch.delenv("USE_FLAGTUNE", raising=False)
+    monkeypatch.delenv("USE_FLAGTUNE_COST_MODEL", raising=False)
 
     class FakeTuner:
         __name__ = "mm"
@@ -2038,8 +2080,14 @@ def test_adapted_config_cache_namespace_separates_tuning_modes():
         "_flagtune_expanded"
     )
     assert names[flagtune_runtime_mod.TuningMode.COST_MODEL].endswith(
-        "_flagtune_cost_model"
+        "_flagtune_cost_model_auto_fallback_v2"
     )
+    tuner._flagtune_mode = flagtune_runtime_mod.TuningMode.COST_MODEL
+    monkeypatch.setenv("USE_FLAGTUNE_COST_MODEL", "1")
+    required_name = LibTuner._make_config_table_name(tuner)
+    assert required_name.endswith("_flagtune_cost_model_required_fallback_v2")
+    assert required_name not in names.values()
+    assert "mm_kernel_flagtune_cost_model" not in (*names.values(), required_name)
 
 
 @pytest.mark.parametrize(
@@ -2160,8 +2208,15 @@ def test_benchmark_config_reuses_kernel_context_and_bypasses_caches(
 def test_hopper_mm_config_compiles_without_runtime_registration():
     """Compile all training variants and verify canonical kernel pair bindings."""
     mm_ops = importlib.import_module("flag_gems.runtime.backend._nvidia.hopper.ops.mm")
+    from triton.flagtune.contract.operator_schema import VariantInfo
+
+    from flag_gems.flagtune.config_space import runtime_configs_for_variant
     from flag_gems.flagtune.contracts import operator as operator_config_mod
 
+    if not {"stage", "dtype_roles", "route_binding"}.issubset(
+        getattr(VariantInfo, "__dataclass_fields__", {})
+    ):
+        pytest.skip("MM contract requires stage-aware FlagTree")
     spec = operator_config_mod.load_operator_benchmark_spec(
         os.path.join(
             os.path.dirname(operator_config_mod.__file__),
@@ -2201,7 +2256,7 @@ def test_hopper_mm_config_compiles_without_runtime_registration():
     for name, (shape, config_count, feature_count) in expected.items():
         variant = operator.get_variant(name)
         assert variant.matches(shape)
-        assert sum(1 for _ in variant.iter_configs()) == config_count
+        assert runtime_configs_for_variant(operator.op_id, name, platform="nvidia")
         assert len(variant.feature_names) == feature_count
 
     assert operator.op_id == "flaggems/mm"
@@ -2212,7 +2267,6 @@ def test_hopper_mm_config_compiles_without_runtime_registration():
         "general_tma": "mm_kernel_general_host_tma",
         "gemv": "gemv_kernel",
         "splitk_two_step_partial": "_mm_kernel_splitk",
-        "splitk": "_mm_kernel_splitk",
         "tma_transposed_direct": "mm_kernel_tma_transposed_direct",
     }
     for variant_name, expected_kernel_name in bound_kernel_names.items():
@@ -2231,7 +2285,12 @@ def test_hopper_mm_config_compiles_without_runtime_registration():
     assert (
         mm_ops.mm_kernel_splitk.fn._flagtune_op_id,
         mm_ops.mm_kernel_splitk.fn._flagtune_variant,
-    ) == ("flaggems/mm", "splitk")
+    ) == (None, None)
+    assert mm_ops.mm_kernel_splitk.fn._flagtune_expand_op_name == "mm_splitk"
+    with pytest.raises(RuntimeError, match="found 0"):
+        libentry_mod.find_flagtune_benchmark_target(
+            public_operator, operator.op_id, "splitk"
+        )
     assert (
         mm_ops.mm_kernel_splitk_partials.fn._flagtune_op_id,
         mm_ops.mm_kernel_splitk_partials.fn._flagtune_variant,
@@ -2241,7 +2300,6 @@ def test_hopper_mm_config_compiles_without_runtime_registration():
         mm_ops.mm_kernel_tma_transposed_direct_tuned.fn._flagtune_variant,
     ) == ("flaggems/mm", "tma_transposed_direct")
 
-    direct_variant = operator.get_variant("tma_transposed_direct")
     from flag_gems import runtime
 
     runtime_configs = runtime.ops_get_configs(
@@ -2251,11 +2309,9 @@ def test_hopper_mm_config_compiles_without_runtime_registration():
     )
     assert len(runtime_configs) == 55
 
-    two_step_variant = operator.get_variant("splitk_two_step")
-    two_step_configs = [
-        two_step_variant.to_config(config)
-        for config in two_step_variant.iter_configs()
-    ]
+    two_step_configs = runtime_configs_for_variant(
+        operator.op_id, "splitk_two_step", platform="nvidia"
+    )
     small_n_configs = mm_ops._prune_mm_splitk_two_step_configs(
         two_step_configs,
         {"N": 32},

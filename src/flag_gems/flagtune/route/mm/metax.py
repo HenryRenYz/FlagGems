@@ -36,7 +36,10 @@ def select_mm_route(a: Any, b: Any, module: Any) -> str:
         and module._prefer_dense_nt_over_generic_splitk(m, n, k)
     )
     if module.splitk_mm_scenario(m, n, k) and not prefer_dense_nt:
-        if c.dtype == torch.float32 and not torch.are_deterministic_algorithms_enabled():
+        if (
+            c.dtype == torch.float32
+            and not torch.are_deterministic_algorithms_enabled()
+        ):
             return "metax_splitk"
         return "metax_splitk_two_step"
     if module.nn_mm_scenario(a, b, c, m, n, k):

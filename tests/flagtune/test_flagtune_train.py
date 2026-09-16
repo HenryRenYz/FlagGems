@@ -194,12 +194,16 @@ def _run_training_with_results(mod, monkeypatch, tmp_path, results, exported):
     """Run the training coordinator with collection and XGBoost boundaries faked."""
 
     class Record:
+        variant = "general_tma"
+
         @staticmethod
         def to_benchmark_shape():
             return {"M": 16}
 
     variant = SimpleNamespace(
         name="general_tma",
+        op_id="flaggems/mm",
+        normalize_inputs=lambda values: {"M": values["M"]},
         feature_names=("M",),
         iter_configs=lambda: iter(({"BLOCK": 16},)),
     )
@@ -208,6 +212,7 @@ def _run_training_with_results(mod, monkeypatch, tmp_path, results, exported):
         get_variant=lambda _name: variant,
     )
     spec = SimpleNamespace(
+        op_id="flaggems/mm",
         operator_info=operator_info,
         source_sha256="sha256",
         shape=SimpleNamespace(identity=("M",)),
@@ -215,6 +220,7 @@ def _run_training_with_results(mod, monkeypatch, tmp_path, results, exported):
     context = SimpleNamespace(
         visible_device_count=1,
         backend_name="cuda",
+        vendor_name="nvidia",
         device_names=("NVIDIA H20-3e",),
         device_architectures=("sm90",),
     )
@@ -228,6 +234,17 @@ def _run_training_with_results(mod, monkeypatch, tmp_path, results, exported):
     run_dir.mkdir()
 
     monkeypatch.setattr(mod, "load_operator_benchmark_spec", lambda _path: spec)
+
+    def fake_runtime_configs(op_id, variant_name, *, platform):
+        assert (op_id, variant_name, platform) == (
+            "flaggems/mm",
+            "general_tma",
+            "nvidia",
+        )
+        return [SimpleNamespace(kwargs={"BLOCK": 16}, num_warps=4, num_stages=2)]
+
+    # Candidate resolution must not probe the CI host's actual backend/YAML.
+    monkeypatch.setattr(mod, "runtime_configs_for_variant", fake_runtime_configs)
     monkeypatch.setattr(
         mod, "load_shape_records", lambda _path, _spec: [Record(), Record()]
     )
@@ -416,12 +433,12 @@ def test_collection_rows_are_flattened_to_streaming_training_jsonl(tmp_path):
         "Count": 9,
     }
     assert row["ranking_group"] == {
-            "operator_id": "flaggems/mm",
-            "variant": "general_tma",
-            "route_variant": "general_tma",
-            "stage": "public",
-            "latency_scope": "public_kernel",
-            "dimensions": {
+        "operator_id": "flaggems/mm",
+        "variant": "general_tma",
+        "route_variant": "general_tma",
+        "stage": "public",
+        "latency_scope": "public_kernel",
+        "dimensions": {
             "M": 64,
             "N": 32,
             "K": 128,
@@ -601,10 +618,10 @@ def test_generic_config_timing_serialization_uses_triton_quantile_order():
             "config": {"BLOCK_M": 16, "num_warps": 4},
             "latency_ms": 1.2,
             "latency_p50_ms": 1.2,
-                "latency_p20_ms": 1.0,
-                "latency_p80_ms": None,
-                "latency_scope": "public_kernel",
-                "status": "ok",
+            "latency_p20_ms": 1.0,
+            "latency_p80_ms": None,
+            "latency_scope": "public_kernel",
+            "status": "ok",
         }
     ]
 

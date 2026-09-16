@@ -32,7 +32,7 @@ from flag_gems.ops.mv import mv as _generic_mv
 from flag_gems.runtime import torch_device_fn
 from flag_gems.utils import libentry, libtuner
 
-from ._matmul_utils import (
+from .gemm_utils import (
     _GEMV_PROGRAM_WIDTH,
     _GEMV_REDUCTION_TILE,
     _GEMV_ROW_VECTOR_MAX_WORK,
@@ -2391,7 +2391,7 @@ def _can_use_ppu_gemv(inp: torch.Tensor, vec: torch.Tensor) -> bool:
     )
 
 
-def mv(inp: torch.Tensor, vec: torch.Tensor) -> torch.Tensor:
+def _mv(inp: torch.Tensor, vec: torch.Tensor) -> torch.Tensor:
     logger.debug("GEMS_THEAD MV")
     if not _can_use_ppu_gemv(inp, vec):
         return _generic_mv(inp, vec)
@@ -2421,4 +2421,4 @@ def mv(inp: torch.Tensor, vec: torch.Tensor) -> torch.Tensor:
     return out
 
 
-__all__ = ["mm", "mm_out", "mv"]
+__all__ = ["mm", "mm_out"]

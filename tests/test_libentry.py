@@ -1270,7 +1270,7 @@ def test_enabled_flagtree_policy_propagates_contract_failures(
 @requires_flagtree_flagtune
 @pytest.mark.parametrize("phase", ["preload", "postload"])
 @pytest.mark.parametrize("setting", [None, "1", " 1 "])
-def test_cost_model_failures_fuse_only_auto(monkeypatch, caplog, phase, setting):
+def test_cost_model_failures_fuse_only_auto(monkeypatch, capsys, phase, setting):
     FlagTuneError = pytest.importorskip(
         "triton.flagtune.runtime.errors",
         reason="AUTO fuse tests require FlagTree's unified runtime errors",
@@ -1317,12 +1317,18 @@ def test_cost_model_failures_fuse_only_auto(monkeypatch, caplog, phase, setting)
         assert isinstance(error.value.__cause__, (FileNotFoundError, ValueError))
         assert not cost_model_mod._COST_MODEL_DISABLED_OPS
         assert calls["fallback"] == 0
+        output = capsys.readouterr().err
+        assert "REQUIRED Cost Model failed" in output
+        assert f"phase={phase}" in output
     else:
         policy(tuner, None, candidates, (), {})
         policy(tuner, None, candidates, (), {})
         assert calls["load"] == 1
         assert calls["fallback"] == 2
-        assert sum(f"phase={phase}" in record.message for record in caplog.records) == 1
+        output = capsys.readouterr().err
+        assert output.count("AUTO fallback") == 1
+        assert f"phase={phase}" in output
+        assert "caused_by=" in output
 
         # Repairing the model path does not re-enable AUTO in this process.
         def repaired_load(*args):
@@ -1344,7 +1350,7 @@ def test_cost_model_failures_fuse_only_auto(monkeypatch, caplog, phase, setting)
 
 @requires_flagtree_flagtune
 def test_auto_fuse_covers_all_devices_and_dtypes_of_only_one_variant(
-    monkeypatch, caplog
+    monkeypatch, capsys
 ):
     FlagTuneError = pytest.importorskip(
         "triton.flagtune.runtime.errors",
@@ -1401,10 +1407,7 @@ def test_auto_fuse_covers_all_devices_and_dtypes_of_only_one_variant(
         ("flaggems/mm", "general_tma"),
         ("flaggems/mm", "gemv"),
     }
-    assert (
-        sum("disabled for operator flaggems/mm" in r.message for r in caplog.records)
-        == 2
-    )
+    assert capsys.readouterr().err.count("AUTO fallback") == 2
 
     policy(mul1, None, candidates, (), {})
     assert loads[-1] == ("flaggems/mul", "scalar")
@@ -2210,8 +2213,8 @@ def test_hopper_mm_config_compiles_without_runtime_registration():
     mm_ops = importlib.import_module("flag_gems.runtime.backend._nvidia.hopper.ops.mm")
     from triton.flagtune.contract.operator_schema import VariantInfo
 
-    from flag_gems.flagtune.config_space import runtime_configs_for_variant
     from flag_gems.flagtune.contracts import operator as operator_config_mod
+    from flag_gems.flagtune.train.config_space import runtime_configs_for_variant
 
     if not {"stage", "dtype_roles", "route_binding"}.issubset(
         getattr(VariantInfo, "__dataclass_fields__", {})

@@ -84,10 +84,6 @@ from flag_gems.flagtune.collection.scheduler import (  # noqa: E402
     BenchmarkError,
     run_shape_config_benchmarks,
 )
-from flag_gems.flagtune.config_space import (  # noqa: E402
-    runtime_configs_for_variant,
-    runtime_configs_hash,
-)
 from flag_gems.flagtune.contracts.operator import (  # noqa: E402
     OperatorConfigError,
     initialize_planning_context,
@@ -103,6 +99,10 @@ from flag_gems.flagtune.reporting.schema import (  # noqa: E402
     SCHEMA_VERSION,
     pretune_json_row,
     rounded_ms,
+)
+from flag_gems.flagtune.train.config_space import (  # noqa: E402
+    runtime_configs_for_variant,
+    runtime_configs_hash,
 )
 
 DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "flagtune-train-output"

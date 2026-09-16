@@ -1,4 +1,4 @@
-"""Shared resolution of runtime-owned FlagTune candidate spaces."""
+"""Resolve runtime-owned FlagTune candidate spaces for training collection."""
 
 from __future__ import annotations
 

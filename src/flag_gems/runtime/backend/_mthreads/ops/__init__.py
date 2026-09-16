@@ -66,6 +66,7 @@ from .max import max, max_dim
 from .median import median, median_dim, median_dim_values, median_out
 from .min import min, min_dim
 from .mish import mish, mish_
+from .mm import mm, mm_out
 from .mode import mode
 from .mul import mul, mul_
 from .nonzero_numpy import nonzero_numpy
@@ -176,6 +177,8 @@ __all__ = [
     "min_dim",
     "mish",
     "mish_",
+    "mm",
+    "mm_out",
     "mode",
     "mul",
     "mul_",
@@ -228,7 +231,6 @@ if get_device_capability(current_device())[0] >= 3:
     from .baddbmm import baddbmm, baddbmm_out  # noqa: F401
     from .bmm import bmm  # noqa: F401
     from .gelu import gelu  # noqa: F401
-    from .mm import mm  # noqa: F401
     from .tanh import tanh  # noqa: F401
 
     __all__.extend(
@@ -241,7 +243,6 @@ if get_device_capability(current_device())[0] >= 3:
             "baddbmm_out",
             "bmm",
             "gelu",
-            "mm",
             "tanh",
         ]
     )

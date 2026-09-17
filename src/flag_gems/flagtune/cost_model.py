@@ -27,7 +27,7 @@ from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, Type
 import triton
 
 from flag_gems import runtime
-from flag_gems.flagtune._status import exception_reason, print_status
+from flag_gems.flagtune.reporting.status import exception_reason, print_status
 
 _FLAGTUNE_PROPOSER_POOL: Dict[Any, Any] = {}
 _FLAGTUNE_VARIANT_INFO_POOL: Dict[Any, Any] = {}

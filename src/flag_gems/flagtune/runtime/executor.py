@@ -52,7 +52,7 @@ from ..contracts.operator import (
     resolve_public_operator,
 )
 from ..contracts.records import ShapeRecord
-from ..route.mm import ROUTE_TO_STAGE, make_recipe_id
+from ..train.route.mm import ROUTE_TO_STAGE, make_recipe_id
 
 
 class BenchmarkExecutionError(RuntimeError):

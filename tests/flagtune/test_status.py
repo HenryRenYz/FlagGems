@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-status = importlib.import_module("flag_gems.flagtune._status")
+status = importlib.import_module("flag_gems.flagtune.reporting.status")
 
 
 def test_status_uses_stderr_and_flush(monkeypatch):

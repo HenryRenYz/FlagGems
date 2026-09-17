@@ -84,7 +84,7 @@ def runtime_configs_for_variant(
         platform_name = platform_text
     expand_yaml_path = yaml_path
     if expand_yaml_path is None and op_id == "flaggems/mm":
-        from flag_gems.flagtune.route.common import backend_module
+        from flag_gems.flagtune.train.route.common import backend_module
 
         backend = backend_module("mm", platform_name)
         expand_yaml_path = getattr(backend, "EXPAND_CONFIG_FILENAME", None)

@@ -109,8 +109,10 @@ from flag_gems.flagtune.reporting.artifacts import (  # noqa: E402
     write_outputs,
 )
 from flag_gems.flagtune.reporting.schema import SCHEMA_VERSION  # noqa: E402
-from flag_gems.flagtune.route.common import platform as route_platform  # noqa: E402
-from flag_gems.flagtune.route.mm import (  # noqa: E402
+from flag_gems.flagtune.train.route.common import (  # noqa: E402
+    platform as route_platform,
+)
+from flag_gems.flagtune.train.route.mm import (  # noqa: E402
     make_recipe_id,
     recipe_layout_metadata,
     route_metadata_for_variant,

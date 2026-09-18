@@ -22,6 +22,7 @@ from .flagtune import (
     TuningMode,
     flagtune,
     flagtune_enabled,
+    flagtune_expanded_enabled,
     resolve_cost_model_intent,
     resolve_tuning_mode,
 )
@@ -94,6 +95,7 @@ __all__ = [
     "device",
     "error",
     "flagtune",
+    "flagtune_expanded_enabled",
     "flagtune_enabled",
     "get_expand_config",
     "get_heuristic_config",

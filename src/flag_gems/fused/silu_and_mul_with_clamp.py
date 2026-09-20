@@ -23,12 +23,15 @@ from flag_gems.utils import pointwise_dynamic
 logger = logging.getLogger(__name__)
 
 
-@pointwise_dynamic(promotion_methods=[(0, 1, 2, "DEFAULT")])
+@pointwise_dynamic(
+    is_tensor=[True, True, False],
+    promotion_methods=[(0, 1, 2, "DEFAULT")],
+)
 @triton.jit
 def silu_and_mul_with_clamp_kernel(x, y, limit):
     x_fp32 = x.to(tl.float32)
     y_fp32 = y.to(tl.float32)
-    limit_fp32 = limit.to(tl.float32)
+    limit_fp32 = limit
 
     gate = tl.minimum(x_fp32, limit_fp32)
     up = tl.minimum(tl.maximum(y_fp32, -limit_fp32), limit_fp32)
@@ -38,6 +41,7 @@ def silu_and_mul_with_clamp_kernel(x, y, limit):
 
 
 @pointwise_dynamic(
+    is_tensor=[True, True, True, False],
     promotion_methods=[
         (0, 1, 2, 3, "DEFAULT"),
         (0, 1, 2, 3, "DEFAULT"),
@@ -49,7 +53,7 @@ def silu_and_mul_with_clamp_grad_kernel(x, y, dgrad, limit):
     x_fp32 = x.to(tl.float32)
     y_fp32 = y.to(tl.float32)
     dgrad_fp32 = dgrad.to(tl.float32)
-    limit_fp32 = limit.to(tl.float32)
+    limit_fp32 = limit
 
     gate = tl.minimum(x_fp32, limit_fp32)
     up = tl.minimum(tl.maximum(y_fp32, -limit_fp32), limit_fp32)
@@ -70,16 +74,16 @@ def silu_and_mul_with_clamp_grad_kernel(x, y, dgrad, limit):
 class SiluAndMulWithClamp(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, y, limit):
-        limit_tensor = torch.tensor(limit, device=x.device, dtype=x.dtype)
-        ctx.save_for_backward(x, y, limit_tensor)
+        ctx.save_for_backward(x, y)
+        ctx.limit = limit
         logger.debug("GEMS SILU_AND_MUL_WITH_CLAMP_FORWARD")
-        return silu_and_mul_with_clamp_kernel(x, y, limit_tensor)
+        return silu_and_mul_with_clamp_kernel(x, y, limit)
 
     @staticmethod
     def backward(ctx, dgrad):
-        x, y, limit_tensor = ctx.saved_tensors
+        x, y = ctx.saved_tensors
         logger.debug("GEMS SILU_AND_MUL_WITH_CLAMP_BACKWARD")
-        dx, dy = silu_and_mul_with_clamp_grad_kernel(x, y, dgrad, limit_tensor)
+        dx, dy = silu_and_mul_with_clamp_grad_kernel(x, y, dgrad, ctx.limit)
         return dx, dy, None
 
 
@@ -89,6 +93,5 @@ def silu_and_mul_with_clamp(x, y, limit):
 
 def silu_and_mul_with_clamp_out(x, y, out, limit):
     logger.debug("GEMS SILU_AND_MUL_WITH_CLAMP_OUT")
-    limit_tensor = torch.tensor(limit, device=x.device, dtype=x.dtype)
-    silu_and_mul_with_clamp_kernel(x, y, limit_tensor, out0=out)
+    silu_and_mul_with_clamp_kernel(x, y, limit, out0=out)
     return out

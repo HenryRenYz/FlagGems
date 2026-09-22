@@ -2,6 +2,7 @@
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
+#
 # You may obtain a copy of the License at
 #
 #     http://www.apache.org/licenses/LICENSE-2.0
@@ -12,9 +13,4 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""FlagTune integration split into online inference and offline tooling.
-
-The :mod:`flag_gems.flagtune.inference` package is the small runtime dependency
-used by Cost Model prediction.  Expanded collection, training, packaging, and
-comparison live under :mod:`flag_gems.flagtune.offline`.
-"""
+"""Helpers for FlagTune training data collection."""

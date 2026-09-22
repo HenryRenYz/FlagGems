@@ -12,9 +12,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""FlagTune integration split into online inference and offline tooling.
+"""Generic FlagTune route resolution and operator-specific route packages."""
 
-The :mod:`flag_gems.flagtune.inference` package is the small runtime dependency
-used by Cost Model prediction.  Expanded collection, training, packaging, and
-comparison live under :mod:`flag_gems.flagtune.offline`.
-"""
+from .common import (
+    BACKEND_MODULES,
+    backend_module,
+    make_recipe_id,
+    platform,
+    recipe_layout_metadata,
+)
+from .resolver import ROUTE_RESOLVERS, register_route_resolver, resolve_route
+
+__all__ = [
+    "BACKEND_MODULES",
+    "ROUTE_RESOLVERS",
+    "backend_module",
+    "make_recipe_id",
+    "platform",
+    "recipe_layout_metadata",
+    "register_route_resolver",
+    "resolve_route",
+]

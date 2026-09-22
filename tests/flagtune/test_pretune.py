@@ -30,7 +30,7 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
-from flag_gems.flagtune.reporting import schema as reporting_schema
+from flag_gems.flagtune.offline.reporting import schema as reporting_schema
 
 HAS_FLAGTREE_FLAGTUNE = importlib.util.find_spec("triton.flagtune") is not None
 pytestmark = pytest.mark.skipif(
@@ -52,6 +52,7 @@ SCRIPT_PATH = (
     / "src"
     / "flag_gems"
     / "flagtune"
+    / "offline"
     / "cli"
     / "pretune.py"
 )
@@ -281,7 +282,7 @@ def test_mul_shape_loader_aligns_optional_rhs_before_count(tmp_path):
 
 def test_mul_executor_uses_variant_specific_tensor_and_scalar_arguments():
     """Construct only active tensors and pass the scalar recipe to ``mul``."""
-    from flag_gems.flagtune.runtime import executor as executor_mod
+    from flag_gems.flagtune.offline.runtime import executor as executor_mod
 
     mod = load_module()
     spec = mod.load_operator_benchmark_spec(MUL_CONFIG_PATH)
@@ -326,6 +327,198 @@ def test_mul_executor_uses_variant_specific_tensor_and_scalar_arguments():
         1.25,
     )
     assert [entry[1] for entry in calls] == [(18,)]
+
+
+def test_mul_keeps_legacy_contract_dispatch():
+    """MUL must keep using contract predicates rather than tensor routing."""
+    from flag_gems.flagtune.offline.train.route.resolver import has_route_resolver
+
+    assert not has_route_resolver("mul")
+    assert not has_route_resolver("flaggems/mul")
+    assert has_route_resolver("flaggems/mm")
+
+    mod = load_module()
+    spec = mod.load_operator_benchmark_spec(MUL_CONFIG_PATH)
+    for values, expected in (
+        ({"kind": "scalar", "lhs_shape": [128]}, "scalar"),
+        (
+            {"kind": "broadcast", "lhs_shape": [2, 1], "rhs_shape": [2, 2048]},
+            "broadcast_2d",
+        ),
+    ):
+        normalized, _ = spec.shape.normalize_values(values, "test")
+        assert spec.resolve_variant(normalized) == expected
+
+
+@pytest.mark.parametrize(
+    ("manifest_platform", "normalized"),
+    [
+        ("hygon-bw", "hygon"),
+        ("metax-c550", "metax"),
+        ("mthreads-s5000", "mthreads"),
+        ("nvidia-h20", "nvidia"),
+        ("thead-zw810e", "thead"),
+    ],
+)
+def test_route_platform_matches_default_manifest_catalog(manifest_platform, normalized):
+    """Normalize every platform key published by FlagTree's default manifest."""
+    from flag_gems.flagtune.offline.train.route.common import platform
+
+    assert platform({"platform_key": manifest_platform}) == normalized
+
+
+def test_mm_executor_resolves_route_before_tuner_lookup(monkeypatch):
+    """Use the real tensor route as the authoritative MM tuning variant."""
+    from flag_gems.flagtune.offline.runtime import executor as executor_mod
+    from flag_gems.flagtune.offline.train.route import resolver
+
+    worker = executor_mod.BenchmarkWorker.__new__(executor_mod.BenchmarkWorker)
+    worker.spec = SimpleNamespace(
+        op_id="flaggems/mm",
+        benchmark=SimpleNamespace(tensor_names=("a", "b")),
+        operator_info=SimpleNamespace(
+            variants={"metax_splitk_two_step_partial": object()}
+        ),
+    )
+    worker.device_runtime = SimpleNamespace(
+        metadata=lambda _index=0: {"platform_key": "metax-c550"}
+    )
+    monkeypatch.setitem(
+        resolver.ROUTE_RESOLVERS,
+        "flaggems/mm",
+        lambda _a, _b, _context: {
+            "physical_route": "metax_splitk_two_step",
+            "tuning_variant": "metax_splitk_two_step_partial",
+            "stage": "partial",
+            "adapted": True,
+            "dynamic_inputs": {"SPLIT_K": 8},
+        },
+    )
+
+    variant, route = worker._resolve_runtime_route(
+        {"M": 32, "N": 256, "K": 4096},
+        {"a": object(), "b": object()},
+        "metax_general",
+    )
+
+    assert variant == "metax_splitk_two_step_partial"
+    assert route["physical_route"] == "metax_splitk_two_step"
+    assert route["dynamic_inputs"] == {"SPLIT_K": 8}
+
+
+def test_mm_executor_keeps_non_adapted_route_out_of_model_binding(monkeypatch):
+    """An unsupported physical route is reported before tuner discovery."""
+    from flag_gems.flagtune.offline.runtime import executor as executor_mod
+    from flag_gems.flagtune.offline.train.route import resolver
+
+    worker = executor_mod.BenchmarkWorker.__new__(executor_mod.BenchmarkWorker)
+    worker.spec = SimpleNamespace(
+        op_id="flaggems/mm", benchmark=SimpleNamespace(tensor_names=("a", "b"))
+    )
+    worker.device_runtime = SimpleNamespace(
+        metadata=lambda _index=0: {"platform_key": "metax-c550"}
+    )
+    monkeypatch.setitem(
+        resolver.ROUTE_RESOLVERS,
+        "flaggems/mm",
+        lambda _a, _b, _context: {
+            "physical_route": "metax_small_n",
+            "tuning_variant": None,
+            "adapted": False,
+            "dynamic_inputs": {},
+        },
+    )
+
+    variant, route = worker._resolve_runtime_route(
+        {"M": 32, "N": 2, "K": 4096},
+        {"a": object(), "b": object()},
+        "metax_general",
+    )
+
+    assert variant == "metax_small_n"
+    assert route["adapted"] is False
+
+
+@pytest.mark.parametrize("adapted", [True, False])
+def test_worker_routes_actual_tensors_once_before_binding(monkeypatch, adapted):
+    """Unsupported routes never bind a tuner; supported routes bind the stage."""
+    from flag_gems.flagtune.offline.runtime import executor as executor_mod
+    from flag_gems.flagtune.offline.train.route import resolver
+
+    events = []
+    worker = executor_mod.BenchmarkWorker.__new__(executor_mod.BenchmarkWorker)
+    worker.spec = SimpleNamespace(
+        op_id="flaggems/mm",
+        source_sha256="test",
+        operator_info=SimpleNamespace(
+            variants={
+                "public": SimpleNamespace(route_binding="partial"),
+                "partial": SimpleNamespace(route_binding=None),
+            }
+        ),
+        benchmark=SimpleNamespace(tensor_names=("a", "b")),
+    )
+    worker.device_runtime = SimpleNamespace(
+        dtype=lambda x: x, metadata=lambda _: {"platform_key": "metax-c550"}
+    )
+    tensors = {"a": object(), "b": object()}
+
+    def make_tensors(*_):
+        events.append("tensors")
+        return tensors
+
+    def route(a, b, _context):
+        assert a is tensors["a"] and b is tensors["b"]
+        events.append("route")
+        return {
+            "adapted": adapted,
+            "physical_route": "public",
+            "tuning_variant": "partial" if adapted else None,
+            "stage": "partial",
+            "latency_scope": "partial_kernel",
+        }
+
+    def bind(variant):
+        events.append(("bind", variant))
+        raise RuntimeError("stop after binding")
+
+    worker._make_tensors = make_tensors
+    worker._find_tuner = bind
+    worker.skipped_result = lambda payload, **kwargs: {
+        "status": "skipped",
+        "route": payload["route"],
+    }
+    monkeypatch.setitem(resolver.ROUTE_RESOLVERS, "flaggems/mm", route)
+    kwargs = dict(
+        dtype_names=["bfloat16", "bfloat16"],
+        warmup=1,
+        iterations=1,
+        benchmark_mode="event",
+        benchmark_retries=1,
+        tuning_run_mode="force_policy",
+        latency_warmup=1,
+        latency_iterations=1,
+        latency_trials=1,
+        gpu_token="0",
+        worker_id=0,
+    )
+    payload = {"config_sha256": "test", "values": {"M": 1}, "variant": ""}
+    if adapted:
+        with pytest.raises(RuntimeError, match="stop after binding"):
+            worker.benchmark(payload, **kwargs)
+        assert events == ["tensors", "route", ("bind", "partial")]
+    else:
+        assert worker.benchmark(payload, **kwargs)["status"] == "skipped"
+        assert events == ["tensors", "route"]
+
+
+def test_hopper_atomic_splitk_is_not_a_model_route():
+    from flag_gems.flagtune.offline.train.route.mm import route_metadata_for_variant
+
+    route = route_metadata_for_variant("splitk", "nvidia")
+    assert route["adapted"] is False
+    assert route["tuning_variant"] is None
+    assert route["cost_model_variant"] is None
 
 
 def test_operator_yaml_rejects_device_placement_policy(tmp_path, mm_stage_contract):
@@ -405,7 +598,9 @@ def test_operator_yaml_rejects_unknown_identity_namespace(tmp_path, mm_stage_con
 
 def test_public_operator_resolution_reports_missing_callable():
     """Fail explicitly when the op_id suffix is not exported by FlagGems."""
-    config_mod = importlib.import_module("flag_gems.flagtune.contracts.operator")
+    config_mod = importlib.import_module(
+        "flag_gems.flagtune.offline.contracts.operator"
+    )
     with pytest.raises(config_mod.OperatorConfigError, match="no public callable"):
         config_mod.resolve_public_operator(SimpleNamespace(), "flaggems/mm")
 
@@ -505,8 +700,8 @@ def test_variant_resolution_follows_public_mm_priority():
     assert spec.resolve_variant(records[2].values) == "general_tma"
 
 
-def test_variant_filter_happens_before_sort_and_limit():
-    """Filter by exact variant before applying ordering and shape limits."""
+def test_mm_variant_filter_is_deferred_until_tensor_routing():
+    """The parent sorts raw recipes but cannot classify their MM route."""
     mod = load_module()
     selected = mod.select_shape_records(
         make_records(mod),
@@ -517,13 +712,13 @@ def test_variant_filter_happens_before_sort_and_limit():
     )
 
     assert len(selected) == 1
-    assert selected[0].source_index == 1
+    assert selected[0].source_index == 0
     assert selected[0].variant == "splitk"
     assert selected[0].selected_index == 0
 
 
-def test_percentage_shape_limit_rounds_down_after_variant_filtering():
-    """Apply percentages to eligible shapes and never exceed the requested share."""
+def test_mm_parent_percentage_limit_applies_to_raw_recipes():
+    """No shape-only variant classification happens in MM task preparation."""
     mod = load_module()
     records = [
         mod.ShapeRecord(
@@ -551,8 +746,8 @@ def test_percentage_shape_limit_rounds_down_after_variant_filtering():
         "50%",
     )
 
-    assert [record.source_index for record in selected] == [1, 2]
-    assert [record.selected_index for record in selected] == [0, 1]
+    assert [record.source_index for record in selected] == [0, 1, 2]
+    assert [record.selected_index for record in selected] == [0, 1, 2]
 
 
 def test_percentage_shape_limit_rejects_zero_resolved_shapes():
@@ -937,7 +1132,7 @@ def test_write_outputs_keeps_structured_jsonl_and_flat_csv(tmp_path):
 
 def test_worker_success_and_failure_rows_use_platform_key(monkeypatch, tmp_path):
     """Keep the private worker identity field aligned in both result branches."""
-    from flag_gems.flagtune.runtime import executor as executor_mod
+    from flag_gems.flagtune.offline.runtime import executor as executor_mod
 
     libentry_mod = importlib.import_module("flag_gems.utils.libentry")
 
@@ -974,6 +1169,9 @@ def test_worker_success_and_failure_rows_use_platform_key(monkeypatch, tmp_path)
     worker.spec = SimpleNamespace(
         source_sha256="sha256",
         op_id="flaggems/mm",
+        operator_info=SimpleNamespace(
+            variants={"general": SimpleNamespace(route_binding=None)}
+        ),
         public_operator_name="mm",
         shape=SimpleNamespace(identity=("M",)),
         benchmark=SimpleNamespace(
@@ -996,6 +1194,10 @@ def test_worker_success_and_failure_rows_use_platform_key(monkeypatch, tmp_path)
     )
     worker._find_tuner = lambda _variant: (object(), tuner)
     worker._make_tensors = lambda _values, _dtypes, _variant: {}
+    worker._resolve_runtime_route = lambda _values, _tensors, variant: (
+        variant,
+        executor_mod._public_metadata(variant),
+    )
     worker._benchmark_selected_config = lambda **_kwargs: (0.9, 1.0, 1.1)
 
     def invoke(_tensors, _variant):
@@ -1079,9 +1281,9 @@ def test_generic_scheduler_prepares_cases_from_operator_yaml(mm_stage_contract):
         "B_layout": "contiguous",
     }
     assert tasks[0].payload["configs"] == configs
-    assert tasks[0].payload["variant"] == "general_tma"
+    assert tasks[0].payload["variant"] == ""
     assert set(tasks[0].to_json()) == {"task_index", "payload"}
-    assert tasks[1].payload["variant"] == "gemv"
+    assert tasks[1].payload["variant"] == ""
     assert tasks[2].payload["values"] == {
         "B": 1,
         "M": 32,

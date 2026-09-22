@@ -12,9 +12,4 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""FlagTune integration split into online inference and offline tooling.
-
-The :mod:`flag_gems.flagtune.inference` package is the small runtime dependency
-used by Cost Model prediction.  Expanded collection, training, packaging, and
-comparison live under :mod:`flag_gems.flagtune.offline`.
-"""
+"""Minimal online FlagTune Cost Model integration."""

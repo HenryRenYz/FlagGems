@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-status = importlib.import_module("flag_gems.flagtune.reporting.status")
+status = importlib.import_module("flag_gems.flagtune.inference.status")
 
 
 def test_status_uses_stderr_and_flush(monkeypatch):
@@ -44,7 +44,7 @@ def test_status_closed_stream_does_not_fail(monkeypatch):
 def test_model_loaded_once_per_version(monkeypatch, capsys):
     proposer = pytest.importorskip("triton.flagtune.runtime.proposer")
     identity_module = pytest.importorskip("triton.flagtune.contract.identity")
-    cm = importlib.import_module("flag_gems.flagtune.cost_model")
+    cm = importlib.import_module("flag_gems.flagtune.inference.cost_model")
     for name in ("_FLAGTUNE_PROPOSER_POOL", "_FLAGTUNE_VARIANT_INFO_POOL"):
         monkeypatch.setattr(cm, name, {})
     monkeypatch.setattr(cm, "_MODEL_LOAD_STARTED", set())

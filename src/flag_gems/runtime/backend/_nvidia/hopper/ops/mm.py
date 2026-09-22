@@ -1490,6 +1490,9 @@ mm_kernel_splitk = libentry()(
         rep=10,
         flagtune_op_name="mm",
         flagtune_expand_op_name="mm_splitk",
+        policy="flagtune",
+        flagtune_op_id="flaggems/mm",
+        flagtune_variant="splitk",
         flagtune_yaml_path=EXPAND_CONFIG_FILENAME,
         flagtune_pre_hook=None,
     )(_mm_kernel_splitk)

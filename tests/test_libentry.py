@@ -44,9 +44,8 @@ from flag_gems.utils.libentry import (
 )
 
 libentry_mod = importlib.import_module("flag_gems.utils.libentry")
-cost_model_mod = importlib.import_module("flag_gems.flagtune.cost_model")
+cost_model_mod = importlib.import_module("flag_gems.flagtune.inference.cost_model")
 flagtune_runtime_mod = importlib.import_module("flag_gems.runtime.flagtune")
-model_package_mod = importlib.import_module("flag_gems.flagtune.runtime.model_package")
 HAS_FLAGTREE_FLAGTUNE = importlib.util.find_spec("triton.flagtune") is not None
 requires_flagtree_flagtune = pytest.mark.skipif(
     not HAS_FLAGTREE_FLAGTUNE,
@@ -62,12 +61,12 @@ def isolate_cost_model_state(monkeypatch):
     monkeypatch.setattr(cost_model_mod, "_COST_MODEL_IDENTITIES", {})
     monkeypatch.setattr(cost_model_mod, "_FLAGTUNE_AVAILABILITY", None)
 
-    def unexpected_probe():
+    def unexpected_probe(*args, **kwargs):
         raise AssertionError("mode resolution must not probe a model package")
 
     monkeypatch.setattr(
-        model_package_mod,
-        "platform_model_package_available",
+        cost_model_mod,
+        "ensure_proposer",
         unexpected_probe,
     )
 
@@ -195,11 +194,6 @@ def test_tuning_mode_defers_missing_package_handling_to_policy(
     """Model availability must not override intent during mode selection."""
     monkeypatch.setattr(flagtune_runtime_mod, "_include_ops", None)
     monkeypatch.delenv("FLAGTUNE_INCLUDE", raising=False)
-    monkeypatch.setattr(
-        model_package_mod,
-        "platform_model_package_available",
-        lambda: False,
-    )
     if use_flagtune is None:
         monkeypatch.delenv("USE_FLAGTUNE", raising=False)
     else:
@@ -220,11 +214,6 @@ def test_legacy_fallback_honors_operator_include(monkeypatch):
     monkeypatch.delenv("USE_FLAGTUNE", raising=False)
     monkeypatch.delenv("USE_FLAGTUNE_COST_MODEL", raising=False)
     monkeypatch.setenv("FLAGTUNE_INCLUDE", "mm")
-    monkeypatch.setattr(
-        model_package_mod,
-        "platform_model_package_available",
-        lambda: False,
-    )
 
     assert (
         flagtune_runtime_mod.resolve_tuning_mode("mm", supports_cost_model=False)
@@ -243,12 +232,12 @@ def test_expanded_request_does_not_probe_platform_package(monkeypatch, use_flagt
         monkeypatch.setenv("USE_FLAGTUNE", use_flagtune)
     monkeypatch.setenv("USE_FLAGTUNE_COST_MODEL", "0")
 
-    def fail_if_called():
+    def fail_if_called(*args, **kwargs):
         raise AssertionError("Expanded mode must not resolve a model package")
 
     monkeypatch.setattr(
-        model_package_mod,
-        "platform_model_package_available",
+        cost_model_mod,
+        "ensure_proposer",
         fail_if_called,
     )
 
@@ -264,11 +253,6 @@ def test_adapted_operator_rejects_invalid_cost_model_setting(monkeypatch):
     monkeypatch.delenv("FLAGTUNE_INCLUDE", raising=False)
     monkeypatch.delenv("USE_FLAGTUNE", raising=False)
     monkeypatch.setenv("USE_FLAGTUNE_COST_MODEL", "true")
-    monkeypatch.setattr(
-        model_package_mod,
-        "platform_model_package_available",
-        lambda: False,
-    )
 
     with pytest.raises(ValueError, match="USE_FLAGTUNE_COST_MODEL"):
         flagtune_runtime_mod.resolve_tuning_mode("mm", supports_cost_model=True)
@@ -279,12 +263,12 @@ def test_disabled_flagtune_does_not_probe_platform_package(monkeypatch):
     monkeypatch.setenv("USE_FLAGTUNE", "0")
     monkeypatch.delenv("USE_FLAGTUNE_COST_MODEL", raising=False)
 
-    def fail_if_called():
+    def fail_if_called(*args, **kwargs):
         raise AssertionError("disabled FlagTune must not resolve a model package")
 
     monkeypatch.setattr(
-        model_package_mod,
-        "platform_model_package_available",
+        cost_model_mod,
+        "ensure_proposer",
         fail_if_called,
     )
 
@@ -402,11 +386,6 @@ def test_libtuner_apply_defers_model_availability_to_policy(monkeypatch):
             self._flagtune_mode = flagtune_runtime_mod.TuningMode(mode)
 
     monkeypatch.setattr(libentry_mod, "_HAS_FLAGTREE_FLAGTUNE", True)
-    monkeypatch.setattr(
-        model_package_mod,
-        "platform_model_package_available",
-        lambda: False,
-    )
     monkeypatch.setattr(flagtune_runtime_mod, "_include_ops", None)
     monkeypatch.delenv("FLAGTUNE_INCLUDE", raising=False)
     monkeypatch.delenv("USE_FLAGTUNE", raising=False)
@@ -2213,8 +2192,10 @@ def test_hopper_mm_config_compiles_without_runtime_registration():
     mm_ops = importlib.import_module("flag_gems.runtime.backend._nvidia.hopper.ops.mm")
     from triton.flagtune.contract.operator_schema import VariantInfo
 
-    from flag_gems.flagtune.contracts import operator as operator_config_mod
-    from flag_gems.flagtune.train.config_space import runtime_configs_for_variant
+    from flag_gems.flagtune.offline.contracts import operator as operator_config_mod
+    from flag_gems.flagtune.offline.train.config_space import (
+        runtime_configs_for_variant,
+    )
 
     if not {"stage", "dtype_roles", "route_binding"}.issubset(
         getattr(VariantInfo, "__dataclass_fields__", {})
@@ -2335,7 +2316,7 @@ def test_hopper_mm_config_compiles_without_runtime_registration():
 )
 def test_mul_config_compiles_and_binds_runtime_kernels():
     """Bind data-driven mul variants to the scalar and 2D broadcast tuners."""
-    from flag_gems.flagtune.contracts import operator as operator_config_mod
+    from flag_gems.flagtune.offline.contracts import operator as operator_config_mod
 
     spec = operator_config_mod.load_operator_benchmark_spec(
         os.path.join(

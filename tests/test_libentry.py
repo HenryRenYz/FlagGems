@@ -2214,7 +2214,7 @@ def test_hopper_mm_config_compiles_without_runtime_registration():
     expected = {
         "general_tma": ({"M": 4096, "N": 4096, "K": 4096}, 3360, 54),
         "gemv": ({"M": 1024, "N": 1, "K": 4096}, 224, 46),
-        "splitk_two_step": ({"M": 1024, "N": 1024, "K": 4096}, 48, 53),
+        "splitk_two_step": ({"M": 1024, "N": 1024, "K": 4096}, 48, 52),
         "splitk": ({"M": 1024, "N": 1024, "K": 4096}, 576, 53),
         "tma_transposed_direct": (
             {"M": 64, "N": 128, "K": 1536},
@@ -2253,6 +2253,7 @@ def test_hopper_mm_config_compiles_without_runtime_registration():
         "general_tma": "mm_kernel_general_host_tma",
         "gemv": "gemv_kernel",
         "splitk_two_step_partial": "_mm_kernel_splitk",
+        "splitk": "_mm_kernel_splitk",
         "tma_transposed_direct": "mm_kernel_tma_transposed_direct",
     }
     for variant_name, expected_kernel_name in bound_kernel_names.items():
@@ -2271,12 +2272,8 @@ def test_hopper_mm_config_compiles_without_runtime_registration():
     assert (
         mm_ops.mm_kernel_splitk.fn._flagtune_op_id,
         mm_ops.mm_kernel_splitk.fn._flagtune_variant,
-    ) == (None, None)
+    ) == ("flaggems/mm", "splitk")
     assert mm_ops.mm_kernel_splitk.fn._flagtune_expand_op_name == "mm_splitk"
-    with pytest.raises(RuntimeError, match="found 0"):
-        libentry_mod.find_flagtune_benchmark_target(
-            public_operator, operator.op_id, "splitk"
-        )
     assert (
         mm_ops.mm_kernel_splitk_partials.fn._flagtune_op_id,
         mm_ops.mm_kernel_splitk_partials.fn._flagtune_variant,

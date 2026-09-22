@@ -512,13 +512,15 @@ def test_worker_routes_actual_tensors_once_before_binding(monkeypatch, adapted):
         assert events == ["tensors", "route"]
 
 
-def test_hopper_atomic_splitk_is_not_a_model_route():
+def test_hopper_atomic_splitk_is_a_model_route():
     from flag_gems.flagtune.offline.train.route.mm import route_metadata_for_variant
 
     route = route_metadata_for_variant("splitk", "nvidia")
-    assert route["adapted"] is False
-    assert route["tuning_variant"] is None
-    assert route["cost_model_variant"] is None
+    assert route["adapted"] is True
+    assert route["tuning_variant"] == "splitk"
+    assert route["cost_model_variant"] == "splitk"
+    assert route["stage"] == "public"
+    assert route["latency_scope"] == "public_kernel"
 
 
 def test_operator_yaml_rejects_device_placement_policy(tmp_path, mm_stage_contract):

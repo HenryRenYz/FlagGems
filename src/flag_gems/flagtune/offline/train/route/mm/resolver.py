@@ -25,9 +25,13 @@ from .metax import select_mm_route as _select_metax_mm_route
 
 ADAPTED_VARIANTS = {
     "nvidia": frozenset(
-        # Hopper's atomic splitk keeps legacy Expanded tuning and has no
-        # model-bound tuner. A YAML contract alone does not make it adapted.
-        {"gemv", "splitk_two_step", "general_tma", "tma_transposed_direct"}
+        {
+            "gemv",
+            "splitk_two_step",
+            "splitk",
+            "general_tma",
+            "tma_transposed_direct",
+        }
     ),
     "metax": frozenset(
         {

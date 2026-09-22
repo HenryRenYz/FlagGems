@@ -46,6 +46,7 @@ from flag_gems.utils.libentry import (
 libentry_mod = importlib.import_module("flag_gems.utils.libentry")
 cost_model_mod = importlib.import_module("flag_gems.flagtune.inference.cost_model")
 flagtune_runtime_mod = importlib.import_module("flag_gems.runtime.flagtune")
+_REAL_ENSURE_PROPOSER = cost_model_mod.ensure_proposer
 HAS_FLAGTREE_FLAGTUNE = importlib.util.find_spec("triton.flagtune") is not None
 requires_flagtree_flagtune = pytest.mark.skipif(
     not HAS_FLAGTREE_FLAGTUNE,
@@ -1583,6 +1584,7 @@ def test_flagtree_proposer_cache_tracks_resolved_model_version(monkeypatch):
 
     monkeypatch.setattr(cost_model_mod, "_FLAGTUNE_PROPOSER_POOL", {})
     monkeypatch.setattr(cost_model_mod, "_FLAGTUNE_VARIANT_INFO_POOL", {})
+    monkeypatch.setattr(cost_model_mod, "ensure_proposer", _REAL_ENSURE_PROPOSER)
     monkeypatch.setattr(proposer_mod, "load_model_bundle", fake_load)
     monkeypatch.setattr(proposer_mod, "make_config_proposer", fake_make)
 

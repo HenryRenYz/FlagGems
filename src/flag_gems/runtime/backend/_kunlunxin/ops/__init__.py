@@ -46,6 +46,7 @@ from ._prelu_kernel_backward import _prelu_kernel_backward  # noqa: F401
 from ._scaled_dot_product_fused_attention_overrideable import (
     _scaled_dot_product_fused_attention_overrideable,
 )
+from ._thnn_fused_lstm_cell import _thnn_fused_lstm_cell
 from ._thnn_fused_lstm_cell_backward_impl import _thnn_fused_lstm_cell_backward_impl
 from ._unsafe_masked_index_put_accumulate import _unsafe_masked_index_put_accumulate
 from ._upsample_bilinear2d_aa import _upsample_bilinear2d_aa  # noqa: F401
@@ -75,6 +76,8 @@ from .all import all, all_dim, all_dims
 from .amax import amax
 from .amin import amin, amin_
 from .aminmax import aminmax
+from .and_scalar import and_scalar
+from .and_tensor import and_tensor
 from .angle import angle
 from .any import any, any_dim, any_dims
 from .apply_repetition_penalties import apply_repetition_penalties
@@ -109,6 +112,7 @@ from .avg_pool3d import avg_pool3d
 from .avg_pool3d_backward import avg_pool3d_backward
 from .baddbmm import baddbmm, baddbmm_, baddbmm_out
 from .batch_norm import batch_norm, batch_norm_backward
+from .batch_norm_no_update import batch_norm_no_update
 from .bernoulli import bernoulli
 from .bernoulli_ import bernoulli_
 from .binary_cross_entropy import binary_cross_entropy, binary_cross_entropy_out
@@ -136,13 +140,13 @@ from .bitwise_xor import (
     bitwise_xor_scalar_,
     bitwise_xor_scalar_tensor,
     bitwise_xor_tensor,
-    bitwise_xor_tensor_,
     xor,
     xor_,
     xor_scalar,
     xor_scalar_,
     xor_scalar_tensor,
 )
+from .bitwise_xor_tensor_ import bitwise_xor_tensor_
 from .block_diag import block_diag  # noqa: F401
 from .bmm import bmm, bmm_out
 from .broadcast_tensors import broadcast_tensors
@@ -223,7 +227,7 @@ from .empty import empty  # noqa: F401
 from .empty_permuted import empty_permuted  # noqa: F401
 from .eq import eq, eq_, eq_scalar, eq_scalar_
 from .erf import erf, erf_, special_erf
-from .erfc import erfc, erfc_, special_erfc  # noqa: F401
+from .erfc import erfc, erfc_  # noqa: F401
 from .erfinv import erfinv
 from .erfinv_ import erfinv_  # noqa: F401
 from .exp import exp, exp_, exp_out
@@ -290,7 +294,7 @@ from .hardtanh_backward import hardtanh_backward  # noqa: F401
 from .heaviside_ import heaviside_  # noqa: F401
 from .histc import histc
 from .hstack import hstack
-from .hypot import hypot, hypot_
+from .hypot import hypot, hypot_, hypot_out
 from .igamma_ import igamma_  # noqa: F401
 from .igammac import igammac, igammac_out
 from .igammac_ import igammac_
@@ -314,6 +318,8 @@ from .isinf import isinf
 from .isnan import isnan
 from .isneginf import isneginf, isneginf_out
 from .isposinf import isposinf
+from .ixor import ixor
+from .jagged_to_padded_dense_forward import jagged_to_padded_dense_forward
 from .kron import kron
 from .kthvalue import kthvalue
 from .layernorm import layer_norm, layer_norm_backward
@@ -321,7 +327,8 @@ from .lcm import lcm, lcm_
 from .le import le, le_, le_scalar
 from .leaky_relu import leaky_relu, leaky_relu_, leaky_relu_backward, leaky_relu_out
 from .lerp import lerp_scalar, lerp_scalar_, lerp_tensor, lerp_tensor_
-from .less_equal import less_equal, less_equal_, less_equal_scalar, less_equal_scalar_
+from .less_equal import less_equal, less_equal_scalar
+from .less_equal_ import less_equal_, less_equal_scalar_
 from .lgamma import lgamma, lgamma_
 from .lift_fresh import lift_fresh  # noqa: F401
 from .lift_fresh_copy import lift_fresh_copy
@@ -363,7 +370,8 @@ from .log_softmax import (
     log_softmax_out,
 )
 from .logaddexp import logaddexp, logaddexp_out
-from .logaddexp2 import logaddexp2, logaddexp2_out
+from .logaddexp2 import logaddexp2
+from .logaddexp2_out import logaddexp2_out
 from .logcumsumexp import logcumsumexp, logcumsumexp_out
 from .logical_and import logical_and, logical_and_
 from .logical_not import logical_not, logical_not_
@@ -381,6 +389,7 @@ from .masked_scatter_backward import masked_scatter_backward
 from .masked_select import masked_select
 from .matmul_bf16 import matmul_bf16
 from .matmul_int8 import matmul_int8
+from .matmuladd import matmuladd
 from .max import max, max_dim
 from .max_pool2d_with_indices import (
     max_pool2d_backward,
@@ -416,6 +425,7 @@ from .nansum import nansum, nansum_out
 from .narrow import narrow  # noqa: F401
 from .narrow_copy import narrow_copy
 from .native_batch_norm import native_batch_norm
+from .native_batch_norm_legit_no_training import native_batch_norm_legit_no_training
 from .native_dropout_backward import native_dropout_backward
 from .native_group_norm import native_group_norm
 from .native_layer_norm import native_layer_norm
@@ -451,6 +461,7 @@ from .ones_like import ones_like
 from .ormqr import ormqr
 from .pad import constant_pad_nd, pad
 from .pairwise_distance import pairwise_distance
+from .pdist_forward import pdist_forward
 from .per_token_group_quant_fp8 import SUPPORTED_FP8_DTYPE, per_token_group_quant_fp8
 from .permute_copy import permute_copy
 from .pixel_unshuffle import pixel_unshuffle, pixel_unshuffle_out
@@ -567,12 +578,15 @@ from .special_chebyshev_polynomial_w import (
     special_chebyshev_polynomial_w_out,
 )
 from .special_digamma import special_digamma
+from .special_erfc import special_erfc
 from .special_erfcx import special_erfcx
 from .special_erfinv import special_erfinv, special_erfinv_, special_erfinv_out
 from .special_exp2 import special_exp2
+from .special_expit import special_expit
 from .special_gammainc import special_gammainc
 from .special_gammaincc import special_gammaincc
-from .special_gammaln import special_gammaln, special_gammaln_out
+from .special_gammaln import special_gammaln
+from .special_gammaln_out import special_gammaln_out
 from .special_hermite_polynomial_h import special_hermite_polynomial_h
 from .special_i0e import special_i0e, special_i0e_out
 from .special_i1 import special_i1, special_i1_out  # noqa: F401
@@ -604,9 +618,11 @@ from .special_shifted_chebyshev_polynomial_v import (
 from .special_shifted_chebyshev_polynomial_w import (
     special_shifted_chebyshev_polynomial_w,
 )
+from .special_xlog1py import special_xlog1py
 from .split_with_sizes_copy import split_with_sizes_copy  # noqa: F401
 from .sqrt import sqrt, sqrt_
-from .square import square, square_, square_out
+from .square import square, square_out
+from .square_ import square_
 from .squeeze_copy import squeeze_copy  # noqa: F401
 from .stack import stack
 from .std import std
@@ -640,6 +656,12 @@ from .upsample_linear1d_backward import upsample_linear1d_backward
 from .upsample_nearest1d import upsample_nearest1d
 from .upsample_nearest2d import upsample_nearest2d
 from .upsample_nearest3d import upsample_nearest3d
+from .upsample_nearest_exact1d import upsample_nearest_exact1d
+from .upsample_nearest_exact2d import (
+    _upsample_nearest_exact2d,
+    _upsample_nearest_exact2d_out,
+)
+from .upsample_nearest_exact2d_backward import upsample_nearest_exact2d_backward
 from .upsample_trilinear3d import upsample_trilinear3d
 from .var import var, var_correction, var_dim
 from .var_mean import var_mean
@@ -695,12 +717,15 @@ __all__ = [
     "_scaled_dot_product_fused_attention_overrideable",
     "_segment_reduce_backward",
     "_segment_reduce_backward_out",
+    "_thnn_fused_lstm_cell",
     "_thnn_fused_lstm_cell_backward_impl",
     "_unique2",
     "_unsafe_masked_index_put_accumulate",
     "_upsample_bicubic2d_aa",
     "_upsample_bicubic2d_aa_backward",
+    "_upsample_nearest_exact2d",
     "_upsample_nearest_exact2d_backward",
+    "_upsample_nearest_exact2d_out",
     "_upsample_nearest_exact3d",
     "_weight_norm",
     "abs",
@@ -741,6 +766,8 @@ __all__ = [
     "amin",
     "amin_",
     "aminmax",
+    "and_scalar",
+    "and_tensor",
     "angle",
     "any",
     "any_dim",
@@ -780,6 +807,7 @@ __all__ = [
     "baddbmm_out",
     "batch_norm",
     "batch_norm_backward",
+    "batch_norm_no_update",
     "bernoulli",
     "bernoulli_",
     "binary_cross_entropy",
@@ -969,6 +997,7 @@ __all__ = [
     "hstack",
     "hypot",
     "hypot_",
+    "hypot_out",
     "igammac",
     "igammac_",
     "igammac_out",
@@ -991,6 +1020,8 @@ __all__ = [
     "isneginf",
     "isneginf_out",
     "isposinf",
+    "ixor",
+    "jagged_to_padded_dense_forward",
     "kron",
     "kthvalue",
     "layer_norm",
@@ -1086,6 +1117,7 @@ __all__ = [
     "masked_select",
     "matmul_bf16",
     "matmul_int8",
+    "matmuladd",
     "max",
     "max_dim",
     "max_pool2d_backward",
@@ -1133,6 +1165,7 @@ __all__ = [
     "nansum_out",
     "narrow_copy",
     "native_batch_norm",
+    "native_batch_norm_legit_no_training",
     "native_dropout_backward",
     "native_group_norm",
     "native_layer_norm",
@@ -1174,6 +1207,7 @@ __all__ = [
     "pad",
     "pairwise_distance",
     "pdist",
+    "pdist_forward",
     "per_token_group_quant_fp8",
     "permute_copy",
     "pixel_unshuffle",
@@ -1354,11 +1388,13 @@ __all__ = [
     "special_shifted_chebyshev_polynomial_v",
     "special_shifted_chebyshev_polynomial_w",
     "special_sinc",
+    "special_xlog1py",
     "sqrt",
     "sqrt_",
     "square",
     "square_",
     "square_out",
+    "squeeze_copy",
     "stack",
     "std",
     "sub",
@@ -1409,6 +1445,8 @@ __all__ = [
     "upsample_nearest1d",
     "upsample_nearest2d",
     "upsample_nearest3d",
+    "upsample_nearest_exact1d",
+    "upsample_nearest_exact2d_backward",
     "upsample_trilinear3d",
     "var",
     "var_correction",

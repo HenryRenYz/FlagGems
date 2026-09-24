@@ -664,6 +664,8 @@ if HAS_PPU_TLE:
         prune_configs_by={"early_config_prune": _prune_single_gemv_configs},
         warmup=25,
         rep=100,
+        # The packaged PPU model was trained with graph-replay candidate timing.
+        benchmark_mode="replay",
         flagtune_op_name="mm",
         flagtune_expand_op_name="gemv_ppu",
         flagtune_op_id="flaggems/mm",

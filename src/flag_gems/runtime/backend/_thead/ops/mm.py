@@ -63,6 +63,7 @@ from .gemm_utils import (
     _prune_narrow_n_configs,
     _prune_single_gemv_configs,
     _prune_split_k_configs,
+    _should_use_grouped_row_gemv,
     _should_use_multi_row_gemv,
     _should_use_narrow_n_gemv,
     _should_use_row_vector_gemv,
@@ -2096,6 +2097,121 @@ def _run_ppu_narrow_n_mm(
             FUSE_ADDMM=fuse_addmm,
         )
     return out
+
+
+def _run_ppu_addmm(
+    bias: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    out: torch.Tensor,
+    alpha,
+    beta,
+) -> torch.Tensor:
+    """Run the PPU GEMM with an in-kernel affine bias epilogue."""
+    M, K = a.shape
+    _, N = b.shape
+    if M <= _SMALL_M_TILE and _prefer_small_m_kernel(1, M, N, K):
+        return _run_partial_m_ppu_mm(
+            a, b, out, bias=bias, alpha=alpha, beta=beta
+        )
+    if N <= 32 and K >= 2 * _GEMV_REDUCTION_TILE and M > _SMALL_M_TILE:
+        return _run_ppu_narrow_n_mm(
+            a, b, out, bias=bias, alpha=alpha, beta=beta
+        )
+    if _should_use_row_vector_narrow_mm(M, N, K):
+        return _run_ppu_narrow_n_mm(
+            a,
+            b,
+            out,
+            bias=bias,
+            alpha=alpha,
+            beta=beta,
+        )
+    if _should_use_grouped_row_gemv(M, N, K):
+        return _run_ppu_grouped_row_gemv_mm(
+            a,
+            b,
+            out,
+            bias=bias,
+            alpha=alpha,
+            beta=beta,
+        )
+    if _should_use_multi_row_gemv(M, N, K):
+        return _run_ppu_multi_row_gemv_mm(
+            a,
+            b,
+            out,
+            bias=bias,
+            alpha=alpha,
+            beta=beta,
+        )
+    if M < 32 and N > 1024:
+        return _run_ppu_narrow_n_mm(
+            a,
+            b,
+            out,
+            bias=bias,
+            alpha=alpha,
+            beta=beta,
+        )
+    if N <= 64:
+        return _run_ppu_narrow_n_mm(
+            a,
+            b,
+            out,
+            bias=bias,
+            alpha=alpha,
+            beta=beta,
+        )
+    # The fixed-row family is useful for genuinely narrow outputs where one
+    # BN tile covers the whole launch.  Keep this width guard ahead of the
+    # low-output regular family; wider outputs retain the measured regular
+    # path so that a masked 16-row tile cannot consume many tiny programs.
+    if N <= 1024 and _prefer_small_m_kernel(1, M, N, K):
+        return _run_partial_m_ppu_mm(
+            a,
+            b,
+            out,
+            bias=bias,
+            alpha=alpha,
+            beta=beta,
+        )
+    if _is_low_output_parallelism(M, N, K):
+        return _run_ppu_mm(
+            a,
+            b,
+            out,
+            bias=bias,
+            alpha=alpha,
+            beta=beta,
+            allow_aligned_a=False,
+        )
+    if _prefer_small_m_kernel(1, M, N, K):
+        return _run_partial_m_ppu_mm(
+            a,
+            b,
+            out,
+            bias=bias,
+            alpha=alpha,
+            beta=beta,
+        )
+    if M <= 32:
+        return _run_partial_m_ppu_mm(
+            a,
+            b,
+            out,
+            bias=bias,
+            alpha=alpha,
+            beta=beta,
+        )
+    return _run_ppu_mm(
+        a,
+        b,
+        out,
+        bias=bias,
+        alpha=alpha,
+        beta=beta,
+    )
 
 
 def _run_partial_m_ppu_mm(

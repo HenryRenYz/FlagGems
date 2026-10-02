@@ -38,8 +38,11 @@ def torch_router_gemm(x, weight):
 
 
 try:
-    from flag_gems.runtime.backend._nvidia.hopper.ops.mm import router_gemm
+    from flag_gems.runtime.backend._nvidia.hopper.ops.mm import (
+        router_gemm as _nvidia_router_gemm,
+    )
 
+    router_gemm = _nvidia_router_gemm
     ROUTER_GEMM_AVAILABLE = True
 except Exception:
     router_gemm = None
@@ -47,11 +50,21 @@ except Exception:
 
 if base.vendor_name == "cambricon":
     try:
-        from flag_gems.runtime.backend._cambricon.ops.mm import router_gemm
+        from flag_gems.runtime.backend._cambricon.ops.mm import (
+            router_gemm as _cambricon_router_gemm,
+        )
 
+        router_gemm = _cambricon_router_gemm
         ROUTER_GEMM_AVAILABLE = True
     except Exception:
         pass
+
+if base.vendor_name == "thead":
+    import flag_gems
+
+    router_gemm = flag_gems.router_gemm
+
+    ROUTER_GEMM_AVAILABLE = True
 
 
 class RouterGemmBenchmark(base.Benchmark):
@@ -66,10 +79,24 @@ class RouterGemmBenchmark(base.Benchmark):
         self.shape_desc = "M, N, K"
 
     def get_input_iter(self, dtype) -> Generator:
+        layouts = {
+            None: ("nt",),
+            "nn": ("nn",),
+            "nt": ("nt",),
+            "both": ("nn", "nt"),
+        }[base.Config.mm_layout]
         for m, n, k in self.shapes:
             x = torch.randn((m, k), dtype=torch.bfloat16, device=self.device)
-            weight = torch.randn((n, k), dtype=torch.bfloat16, device=self.device)
-            yield x, weight
+            for layout in layouts:
+                if layout == "nn":
+                    weight = torch.randn(
+                        (k, n), dtype=torch.bfloat16, device=self.device
+                    ).t()
+                else:
+                    weight = torch.randn(
+                        (n, k), dtype=torch.bfloat16, device=self.device
+                    )
+                yield x, weight
 
     def get_tflops(self, op, *args, **kwargs):
         x, weight = args[0], args[1]
@@ -81,7 +108,7 @@ class RouterGemmBenchmark(base.Benchmark):
 @pytest.mark.router_gemm
 @pytest.mark.skipif(
     not ROUTER_GEMM_AVAILABLE,
-    reason="router_gemm benchmark requires Cambricon or NVIDIA Hopper backend",
+    reason="router_gemm benchmark requires Cambricon, NVIDIA Hopper, or T-Head backend",
 )
 def test_perf_router_gemm():
     bench = RouterGemmBenchmark(

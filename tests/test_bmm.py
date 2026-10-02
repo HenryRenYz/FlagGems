@@ -121,6 +121,47 @@ def test_bmm_out(M, N, K, dtype):
     utils.gems_assert_close(out, ref_out, dtype, reduce_dim=K)
 
 
+@pytest.mark.bmm
+@pytest.mark.skipif(flag_gems.vendor_name != "thead", reason="T-Head PPU GEMM")
+@pytest.mark.parametrize(
+    "batch,M,N,K", [(1, 4, 256, 2048), (4, 16, 128, 4096), (4, 64, 128, 7168)]
+)
+@pytest.mark.parametrize("layout", ("nn", "nt"))
+def test_thead_bmm_layout_routes(batch, M, N, K, layout):
+    a = torch.randn((batch, M, K), dtype=torch.bfloat16, device=flag_gems.device)
+    if layout == "nn":
+        b = torch.randn((batch, K, N), dtype=torch.bfloat16, device=flag_gems.device)
+    else:
+        b = torch.randn(
+            (batch, N, K), dtype=torch.bfloat16, device=flag_gems.device
+        ).transpose(1, 2)
+    reference = torch.bmm(a.float(), b.float()).to(torch.bfloat16)
+    with flag_gems.use_gems():
+        result = torch.bmm(a, b)
+    utils.gems_assert_close(result, reference, torch.bfloat16, reduce_dim=K)
+
+
+@pytest.mark.bmm
+@pytest.mark.skipif(flag_gems.vendor_name != "thead", reason="T-Head PPU GEMM")
+@pytest.mark.parametrize("M,N", [(64, 256), (128, 384)])
+def test_thead_bmm_split_k(M, N):
+    batch, K = 2, 7168
+    select_route = flag_gems.bmm.__globals__["_select_ppu_bmm_route"]
+    assert (
+        select_route(batch, M, N, K, b_transposed=False).value
+        == "bmm_split_k_kernel_ppu"
+    )
+    a = torch.randn((batch, M, K), dtype=torch.bfloat16, device=flag_gems.device)
+    b = torch.randn((batch, K, N), dtype=torch.bfloat16, device=flag_gems.device)
+    expected = torch.bmm(a.float(), b.float()).to(torch.bfloat16)
+    out = torch.empty((batch, M, N), dtype=torch.bfloat16, device=flag_gems.device)
+    with flag_gems.use_gems():
+        result = torch.bmm(a, b)
+        torch.bmm(a, b, out=out)
+    utils.gems_assert_close(result, expected, torch.bfloat16, reduce_dim=K)
+    utils.gems_assert_close(out, expected, torch.bfloat16, reduce_dim=K)
+
+
 FP8_DTYPE = getattr(torch, "float8_e4m3fn", None)
 FP8_W8A8_BLOCK_SCALE_BMM_SHAPES = [
     (2, 16, 32, 64),

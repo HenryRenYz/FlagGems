@@ -116,14 +116,17 @@ class BlasBenchmark(Benchmark):
         self.input_fn = input_fn
 
     def get_input_iter(self, cur_dtype) -> Generator:
-        if self.op_name == "mm" and Config.mm_layout is not None:
+        if (
+            self.op_name in ("mm", "addmm", "bmm", "baddbmm")
+            and Config.mm_layout is not None
+        ):
             layouts = {
                 "nn": (False,),
                 "nt": (True,),
                 "both": (False, True),
             }[Config.mm_layout]
-            for b_column_major in layouts:
-                for b, m, n, k in self.shapes:
+            for b, m, n, k in self.shapes:
+                for b_column_major in layouts:
                     yield from self.input_fn(
                         b,
                         m,
@@ -307,8 +310,17 @@ class RouterGemmBenchmark(BlasBenchmark):
     DEFAULT_SHAPES = ROUTER_GEMM_SHAPES[:]
 
     def get_input_iter(self, cur_dtype) -> Generator:
+        layouts = {
+            None: (True,),  # Keep the historical contiguous [N, K] weight.
+            "nn": (False,),
+            "nt": (True,),
+            "both": (False, True),
+        }[Config.mm_layout]
         for b, m, n, k in self.shapes:
-            yield from self.input_fn(b, m, n, k, cur_dtype, self.device, False)
+            for b_column_major in layouts:
+                yield from self.input_fn(
+                    b, m, n, k, cur_dtype, self.device, b_column_major
+                )
 
     def set_more_shapes(self):
         return None
@@ -353,7 +365,7 @@ def baddbmm_input_fn(b, m, n, k, cur_dtype, device, b_column_major):
         inp2 = torch.randn(
             [b, n, k], dtype=cur_dtype, device=device, requires_grad=True
         )
-        inp2 = inp2.transpose(1, 2).contiguous()
+        inp2 = inp2.transpose(1, 2)
     else:
         inp2 = torch.randn(
             [b, k, n], dtype=cur_dtype, device=device, requires_grad=True
@@ -426,7 +438,12 @@ def addmv_input_fn(m, n, cur_dtype, device):
 
 def router_gemm_input_fn(b, m, n, k, cur_dtype, device, b_column_major):
     x = torch.randn([m, k], dtype=torch.bfloat16, device=device)
-    weight = torch.randn([n, k], dtype=torch.bfloat16, device=device)
+    # router_gemm computes x @ weight.T. A contiguous weight produces NT;
+    # a transposed [K, N] allocation produces a contiguous logical B (NN).
+    if b_column_major:
+        weight = torch.randn([n, k], dtype=torch.bfloat16, device=device)
+    else:
+        weight = torch.randn([k, n], dtype=torch.bfloat16, device=device).t()
     yield x, weight
 
 
@@ -1054,7 +1071,10 @@ class ParallelBenchmarkMixin:
 
 class ParallelBlasBenchmark(ParallelBenchmarkMixin, BlasBenchmark):
     def get_parallel_metric_group_size(self, shape):
-        if self.op_name == "mm" and Config.mm_layout is not None:
+        if (
+            self.op_name in ("mm", "addmm", "bmm", "baddbmm")
+            and Config.mm_layout is not None
+        ):
             return 2 if Config.mm_layout == "both" else 1
         if Config.bench_level == BenchLevel.COMPREHENSIVE:
             return 2
@@ -1151,6 +1171,8 @@ class ParallelMmW8A8Fp8Benchmark(ParallelBlasBenchmark):
 
 class ParallelBaddbmmBenchmark(ParallelBenchmarkMixin, BaddbmmBenchmark):
     def get_parallel_metric_group_size(self, shape):
+        if Config.mm_layout is not None:
+            return 2 if Config.mm_layout == "both" else 1
         if Config.bench_level == BenchLevel.COMPREHENSIVE:
             return 2
         return 1
@@ -1224,6 +1246,9 @@ class ParallelMulBenchmark(ParallelBenchmarkMixin, Benchmark):
 
 class ParallelRouterGemmBenchmark(ParallelBenchmarkMixin, RouterGemmBenchmark):
     SHAPE_CONFIG_KEYS = ("router_gemm",)
+
+    def get_parallel_metric_group_size(self, shape):
+        return 2 if Config.mm_layout == "both" else 1
 
     def _get_tuning_fixed_overhead(self):
         return 30_000_000_000

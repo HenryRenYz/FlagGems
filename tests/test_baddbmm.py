@@ -98,6 +98,8 @@ def test_baddbmm_out(M, N, K, scalar, dtype):
 @pytest.mark.parametrize("scalar", SCALARS)
 @pytest.mark.parametrize("dtype", FLOAT_DTYPES)
 def test_baddbmm_backward(M, N, K, scalar, dtype):
+    if flag_gems.vendor_name == "thead":
+        pytest.skip("T-Head direct GEMM APIs are forward-only")
     if flag_gems.vendor_name == "tsingmicro" and dtype == torch.float32:
         pytest.skip("Issue #3794: not working")
 
@@ -132,3 +134,240 @@ def test_baddbmm_backward(M, N, K, scalar, dtype):
     gems_assert_close(res_in_bias, ref_in_bias, dtype, reduce_dim=K)
     gems_assert_close(res_in_grad1, ref_in_grad1, dtype, reduce_dim=N)
     gems_assert_close(res_in_grad2, ref_in_grad2, dtype, reduce_dim=M)
+
+
+@pytest.mark.baddbmm
+@pytest.mark.skipif(flag_gems.vendor_name != "thead", reason="T-Head PPU GEMM")
+@pytest.mark.parametrize(
+    "batch,M,N,K", [(1, 4, 256, 2048), (4, 16, 128, 4096), (4, 64, 128, 7168)]
+)
+@pytest.mark.parametrize("layout", ("nn", "nt"))
+def test_thead_baddbmm_layout_routes(batch, M, N, K, layout):
+    a = torch.randn((batch, M, K), dtype=torch.bfloat16, device=flag_gems.device)
+    if layout == "nn":
+        b = torch.randn((batch, K, N), dtype=torch.bfloat16, device=flag_gems.device)
+    else:
+        b = torch.randn(
+            (batch, N, K), dtype=torch.bfloat16, device=flag_gems.device
+        ).transpose(1, 2)
+    bias = torch.randn((N,), dtype=torch.bfloat16, device=flag_gems.device)
+    reference = torch.baddbmm(bias.float(), a.float(), b.float(), beta=0).to(
+        torch.bfloat16
+    )
+    bias.fill_(float("nan"))
+    with flag_gems.use_gems():
+        result = torch.baddbmm(bias, a, b, beta=0)
+    gems_assert_close(result, reference, torch.bfloat16, reduce_dim=K)
+
+
+@pytest.mark.baddbmm
+@pytest.mark.skipif(flag_gems.vendor_name != "thead", reason="T-Head PPU GEMM")
+@pytest.mark.parametrize("M,N", [(64, 256), (128, 384)])
+def test_thead_baddbmm_split_k(M, N):
+    batch, K = 2, 7168
+    select_route = flag_gems.bmm.__globals__["_select_ppu_bmm_route"]
+    assert (
+        select_route(batch, M, N, K, b_transposed=False, fuse_bias=True).value
+        == "bmm_split_k_kernel_ppu"
+    )
+    a = torch.randn((batch, M, K), dtype=torch.bfloat16, device=flag_gems.device)
+    b = torch.randn((batch, K, N), dtype=torch.bfloat16, device=flag_gems.device)
+    bias = torch.randn((batch, M, N), dtype=torch.bfloat16, device=flag_gems.device)
+    expected = torch.baddbmm(
+        bias.float(), a.float(), b.float(), alpha=1.25, beta=0.5
+    ).to(torch.bfloat16)
+    out = torch.empty_like(bias)
+    with flag_gems.use_gems():
+        result = torch.baddbmm(bias, a, b, alpha=1.25, beta=0.5)
+        torch.baddbmm(bias, a, b, alpha=1.25, beta=0.5, out=out)
+    gems_assert_close(result, expected, torch.bfloat16, reduce_dim=K)
+    gems_assert_close(out, expected, torch.bfloat16, reduce_dim=K)
+
+    nan_bias = torch.full_like(bias, float("nan"))
+    expected_no_bias = torch.bmm(a.float(), b.float()).to(torch.bfloat16)
+    with flag_gems.use_gems():
+        torch.baddbmm(nan_bias, a, b, beta=0, out=nan_bias)
+    gems_assert_close(nan_bias, expected_no_bias, torch.bfloat16, reduce_dim=K)
+
+
+@pytest.mark.baddbmm
+@pytest.mark.skipif(flag_gems.vendor_name != "thead", reason="T-Head PPU GEMM")
+@pytest.mark.parametrize("layout", ("nn", "nt"))
+def test_thead_baddbmm_alias_beta_zero(layout):
+    batch, M, N, K = 4, 16, 64, 128
+    a = torch.randn((batch, M, K), dtype=torch.bfloat16, device=flag_gems.device)
+    b_storage = torch.randn(
+        (batch, K, N) if layout == "nn" else (batch, N, K),
+        dtype=torch.bfloat16,
+        device=flag_gems.device,
+    )
+    b = b_storage if layout == "nn" else b_storage.transpose(1, 2)
+    expected = torch.bmm(a.float(), b.float()).to(torch.bfloat16)
+
+    for inplace in (False, True):
+        bias = torch.full(
+            (batch, M, N), float("nan"), dtype=torch.bfloat16, device=flag_gems.device
+        )
+        with flag_gems.use_gems():
+            if inplace:
+                result = bias.baddbmm_(a, b, beta=0)
+            else:
+                result = torch.baddbmm(bias, a, b, beta=0, out=bias)
+        assert result.data_ptr() == bias.data_ptr()
+        gems_assert_close(result, expected, torch.bfloat16, reduce_dim=K)
+
+
+@pytest.mark.baddbmm
+@pytest.mark.skipif(flag_gems.vendor_name != "thead", reason="T-Head PPU GEMM")
+def test_thead_baddbmm_registered_nt_backward():
+    batch, M, N, K = 2, 8, 16, 128
+    a = torch.randn(
+        (batch, M, K), dtype=torch.bfloat16, device=flag_gems.device, requires_grad=True
+    )
+    b_base = torch.randn((batch, N, K), dtype=torch.bfloat16, device=flag_gems.device)
+    b = b_base.transpose(1, 2).detach().requires_grad_()
+    bias = torch.randn(
+        (N,), dtype=torch.bfloat16, device=flag_gems.device, requires_grad=True
+    )
+    grad = torch.randn((batch, M, N), dtype=torch.bfloat16, device=flag_gems.device)
+
+    reference = torch.baddbmm(bias.float(), a.float(), b.float())
+    expected_grads = torch.autograd.grad(reference, (bias, a, b), grad.float())
+    direct = flag_gems.baddbmm(bias, a, b)
+    assert not direct.requires_grad
+    with flag_gems.use_gems():
+        result = torch.baddbmm(bias, a, b)
+    actual_grads = torch.autograd.grad(result, (bias, a, b), grad)
+    for actual, expected in zip(actual_grads, expected_grads):
+        gems_assert_close(actual, expected, torch.bfloat16, reduce_dim=K)
+
+
+@pytest.mark.baddbmm
+@pytest.mark.skipif(flag_gems.vendor_name != "thead", reason="T-Head PPU GEMM")
+@pytest.mark.parametrize("layout", ("nn", "nt"))
+def test_thead_baddbmm_ultra_wide_batch(layout):
+    # N exceeds the PPU descriptor field; NN's backing row pitch remains
+    # wider than each logical chunk after slicing.
+    batch, M, N, K = 2, 32, 131200, 128
+    a = torch.randn((batch, M, K), dtype=torch.bfloat16, device=flag_gems.device)
+    b_storage = torch.randn(
+        (batch, K, N) if layout == "nn" else (batch, N, K),
+        dtype=torch.bfloat16,
+        device=flag_gems.device,
+    )
+    b = b_storage if layout == "nn" else b_storage.transpose(1, 2)
+    bias = torch.randn((N,), dtype=torch.bfloat16, device=flag_gems.device)
+    expected = torch.baddbmm(bias.float(), a.float(), b.float()).to(torch.bfloat16)
+    with flag_gems.use_gems():
+        result = torch.baddbmm(bias, a, b)
+    torch.testing.assert_close(result, expected, atol=0.25, rtol=0.02)
+
+
+@pytest.mark.baddbmm
+@pytest.mark.skipif(flag_gems.vendor_name != "thead", reason="T-Head PPU GEMM")
+@pytest.mark.parametrize("layout", ("nn", "nt"))
+def test_thead_baddbmm_ultra_wide_single_row(layout):
+    # M=1 is constexpr-specialized by Triton. The NN epilogue still needs
+    # int64 element arithmetic when the physical B row pitch is ultra-wide.
+    batch, M, N, K = 2, 1, 131200, 128
+    a = torch.randn((batch, M, K), dtype=torch.bfloat16, device=flag_gems.device)
+    b_shape = (batch, K, N) if layout == "nn" else (batch, N, K)
+    b = torch.randn(b_shape, dtype=torch.bfloat16, device=flag_gems.device)
+    if layout == "nt":
+        b = b.transpose(1, 2)
+    bias = torch.randn((N,), dtype=torch.bfloat16, device=flag_gems.device)
+    expected_bmm = torch.bmm(a.float(), b.float()).to(torch.bfloat16)
+    expected = torch.baddbmm(bias.float(), a.float(), b.float()).to(torch.bfloat16)
+    with flag_gems.use_gems():
+        result_bmm = torch.bmm(a, b)
+        result = torch.baddbmm(bias, a, b)
+    torch.testing.assert_close(result_bmm, expected_bmm, atol=0.25, rtol=0.02)
+    torch.testing.assert_close(result, expected, atol=0.25, rtol=0.02)
+
+
+@pytest.mark.baddbmm
+@pytest.mark.skipif(flag_gems.vendor_name != "thead", reason="T-Head PPU GEMM")
+@pytest.mark.parametrize("layout", ("nn", "nt"))
+def test_thead_bmm_small_m_second_row_tile(layout):
+    # BM16 needs a second program for rows 16..30.
+    batch, M, N, K = 2, 17, 16, 2048
+    a = torch.randn((batch, M, K), dtype=torch.bfloat16, device=flag_gems.device)
+    b_shape = (batch, K, N) if layout == "nn" else (batch, N, K)
+    b = torch.randn(b_shape, dtype=torch.bfloat16, device=flag_gems.device)
+    if layout == "nt":
+        b = b.transpose(1, 2)
+    bias = torch.randn((batch, M, N), dtype=torch.bfloat16, device=flag_gems.device)
+    expected_bmm = torch.bmm(a.float(), b.float()).to(torch.bfloat16)
+    expected_baddbmm = torch.baddbmm(bias.float(), a.float(), b.float()).to(
+        torch.bfloat16
+    )
+    with flag_gems.use_gems():
+        actual_bmm = torch.bmm(a, b)
+        actual_baddbmm = torch.baddbmm(bias, a, b)
+    torch.testing.assert_close(actual_bmm, expected_bmm, atol=1.0, rtol=0.03)
+    torch.testing.assert_close(actual_baddbmm, expected_baddbmm, atol=1.0, rtol=0.03)
+
+
+@pytest.mark.baddbmm
+@pytest.mark.skipif(flag_gems.vendor_name != "thead", reason="T-Head PPU GEMM")
+@pytest.mark.parametrize("layout", ("nn", "nt"))
+@pytest.mark.parametrize(
+    "batch,M,N,K",
+    (
+        (2, 8, 4, 16384),
+        (2, 260, 4, 16384),
+        (8, 8, 4, 16384),
+        (4, 260, 4, 16384),
+        (8, 155, 4, 16384),
+        (8, 400, 64, 7168),
+        (8, 1035, 64, 2048),
+    ),
+)
+def test_thead_bmm_narrow_n_routes(batch, M, N, K, layout):
+    selector = flag_gems.bmm.__globals__["_select_ppu_bmm_route"]
+    route = selector(batch, M, N, K, b_transposed=layout == "nt")
+    if N == 64:
+        assert route.value == "bmm_narrow_n_kernel_ppu"
+    elif (batch, M) in ((4, 260), (8, 155)):
+        assert route.value == (
+            "bmm_narrow_columns_kernel_ppu" if layout == "nn" else "bmm_kernel_ppu"
+        )
+    a = torch.randn((batch, M, K), dtype=torch.bfloat16, device=flag_gems.device)
+    b_shape = (batch, K, N) if layout == "nn" else (batch, N, K)
+    b = torch.randn(b_shape, dtype=torch.bfloat16, device=flag_gems.device)
+    if layout == "nt":
+        b = b.transpose(1, 2)
+    bias = torch.randn((batch, M, N), dtype=torch.bfloat16, device=flag_gems.device)
+    expected_bmm = torch.bmm(a.float(), b.float()).to(torch.bfloat16)
+    expected_baddbmm = torch.baddbmm(bias.float(), a.float(), b.float()).to(
+        torch.bfloat16
+    )
+    with flag_gems.use_gems():
+        actual_bmm = torch.bmm(a, b)
+        actual_baddbmm = torch.baddbmm(bias, a, b)
+    torch.testing.assert_close(actual_bmm, expected_bmm, atol=1.0, rtol=0.03)
+    torch.testing.assert_close(actual_baddbmm, expected_baddbmm, atol=1.0, rtol=0.03)
+
+
+@pytest.mark.baddbmm
+@pytest.mark.skipif(flag_gems.vendor_name != "thead", reason="T-Head PPU GEMM")
+@pytest.mark.parametrize(
+    "batch,M,N,K,layout",
+    ((4, 4, 256, 2048, "nt"), (8, 214, 4, 16384, "nn")),
+)
+@pytest.mark.parametrize("alpha,beta", ((1.25, 0.0), (0.75, 1.5)))
+def test_thead_baddbmm_batched_scalar_routes(batch, M, N, K, layout, alpha, beta):
+    a = torch.randn((batch, M, K), dtype=torch.bfloat16, device=flag_gems.device)
+    b_shape = (batch, K, N) if layout == "nn" else (batch, N, K)
+    b = torch.randn(b_shape, dtype=torch.bfloat16, device=flag_gems.device)
+    if layout == "nt":
+        b = b.transpose(1, 2)
+    bias = torch.randn((1, 1, N), dtype=torch.bfloat16, device=flag_gems.device)
+    if beta == 0:
+        bias.fill_(float("nan"))
+    expected = torch.baddbmm(
+        bias.float(), a.float(), b.float(), alpha=alpha, beta=beta
+    ).to(torch.bfloat16)
+    with flag_gems.use_gems():
+        actual = torch.baddbmm(bias, a, b, alpha=alpha, beta=beta)
+    torch.testing.assert_close(actual, expected, atol=1.0, rtol=0.03)

@@ -394,8 +394,14 @@ def _aiu_load_mask(a, b) -> int:
     # physical rows. PPU's order=(0,1) descriptor supports this column-major
     # view directly, so validate that physical row stride as an AIU operand.
     b_row_stride = b.stride(-2)
-    if b.ndim == 2 and b.stride(-2) == 1:
+    if b.ndim in (2, 3) and b.stride(-2) == 1:
         b_row_stride = b.stride(-1)
+    if b_row_stride > _PPU_DESCRIPTOR_MAX_N:
+        # Chunking N changes the logical width but not the backing row pitch.
+        # Mixed AIU/pointer lowering is also unsafe for that oversized pitch;
+        # use the fully regular load path for this view.
+        return 0
+    # Aligned rows within the descriptor's pitch limit may use B's AIU path.
     if b.data_ptr() % 32 == 0 and b_row_stride * b.element_size() % 32 == 0:
         mask |= _AIU_LOAD_B
     return mask
@@ -790,6 +796,7 @@ if HAS_PPU_TLE:
         EVEN_M: tl.constexpr,
         EVEN_N: tl.constexpr,
         FUSE_BIAS: tl.constexpr,
+        READ_BIAS: tl.constexpr,
     ):
         """Compute and store one general GEMM tile; inlined by Triton."""
         a_block_ptr = tl.make_block_ptr(
@@ -899,13 +906,18 @@ if HAS_PPU_TLE:
         c_complete = (EVEN_M or FULL_M_TILES) and (EVEN_N or FULL_N_TILES)
         c_mask = (offs_m[:, None] < M) & (offs_n[None, :] < N)
         if FUSE_BIAS:
-            bias_ptrs = (
-                Bias
-                + store_m[:, None] * stride_bias_m
-                + store_n[None, :] * stride_bias_n
-            )
-            bias_value = tl.load(bias_ptrs, mask=c_mask, other=0.0)
-            acc = alpha * acc + beta * bias_value
+            acc *= alpha
+            if READ_BIAS:
+                bias_ptrs = (
+                    Bias
+                    + store_m[:, None] * stride_bias_m
+                    + store_n[None, :] * stride_bias_n
+                )
+                if c_complete:
+                    bias_value = tl.load(bias_ptrs)
+                else:
+                    bias_value = tl.load(bias_ptrs, mask=c_mask, other=0.0)
+                acc += beta * bias_value
         # Store masks are cheap relative to the reduction and prevent a
         # mismatched constexpr tile from writing a ragged M/N tail.  The
         # previous EVEN_M/EVEN_N shortcut was unsafe because those flags were

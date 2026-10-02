@@ -63,7 +63,6 @@ from .gemm_utils import (
     _prune_narrow_n_configs,
     _prune_single_gemv_configs,
     _prune_split_k_configs,
-    _should_use_grouped_row_gemv,
     _should_use_multi_row_gemv,
     _should_use_narrow_n_gemv,
     _should_use_row_vector_gemv,
@@ -102,6 +101,11 @@ def _full_m_tiles(args):
 def _full_n_tiles(args):
     """Whether the selected column tile divides the logical N extent."""
     return int(args["N"]) % int(args["BLOCK_N"]) == 0
+
+
+def _full_reduction_vectors(args):
+    """Only omit reducer masks when its selected vector covers the output."""
+    return int(args["n_elements"]) % (int(args["BLOCK"]) * int(args["VEC"])) == 0
 
 
 def _is_transposed_contiguous_2d(tensor: torch.Tensor) -> bool:
@@ -648,8 +652,8 @@ if HAS_PPU_TLE:
     @libentry()
     @libtuner(
         configs=_ppu_gemv_configs(),
-        key=["FUSE_ADDMM", "TRANSPOSED", "B_TRANSPOSED", "M", "K"],
-        strategy=["default", "default", "default", "default", "default"],
+        key=["FUSE_ADDMM", "READ_BIAS", "TRANSPOSED", "B_TRANSPOSED", "M", "K"],
+        strategy=["default", "default", "default", "default", "default", "default"],
         prune_configs_by={"early_config_prune": _prune_single_gemv_configs},
         warmup=25,
         rep=100,
@@ -676,6 +680,7 @@ if HAS_PPU_TLE:
         BLOCK_K: tl.constexpr,
         PIPE_STAGES: tl.constexpr,
         FUSE_ADDMM: tl.constexpr,
+        READ_BIAS: tl.constexpr,
         TRANSPOSED: tl.constexpr,
         B_TRANSPOSED: tl.constexpr,
     ):
@@ -704,12 +709,14 @@ if HAS_PPU_TLE:
 
         result = acc
         if FUSE_ADDMM:
+            result = alpha * result
+        if READ_BIAS:
             bias = tl.load(
                 Bias + rows * stride_bias_m,
                 mask=rows < M,
                 other=0.0,
             ).to(tl.float32)
-            result = alpha * result + beta * bias
+            result += beta * bias
         tl.store(
             Y + rows * stride_ym,
             result.to(Y.dtype.element_ty),
@@ -719,8 +726,9 @@ if HAS_PPU_TLE:
     @libentry()
     @libtuner(
         configs=_ppu_multi_row_gemv_configs(),
-        key=["FUSE_ADDMM", "B_TRANSPOSED", "M", "N", "K"],
+        key=["FUSE_ADDMM", "READ_BIAS", "B_TRANSPOSED", "M", "N", "K"],
         strategy=[
+            "default",
             "default",
             "default",
             _ppu_bucket_strategy,
@@ -754,6 +762,7 @@ if HAS_PPU_TLE:
         stride_bias_m,
         stride_bias_n,
         FUSE_ADDMM: tl.constexpr,
+        READ_BIAS: tl.constexpr,
         B_TRANSPOSED: tl.constexpr,
         BLOCK_M: tl.constexpr,
         BLOCK_K: tl.constexpr,
@@ -784,7 +793,7 @@ if HAS_PPU_TLE:
 
         result = alpha * acc
         mask = cols < N
-        if FUSE_ADDMM:
+        if READ_BIAS:
             bias = tl.load(
                 Bias + pid_m * stride_bias_m + cols * stride_bias_n,
                 mask=mask,
@@ -800,8 +809,9 @@ if HAS_PPU_TLE:
     @libentry()
     @libtuner(
         configs=_ppu_narrow_columns_configs(),
-        key=["FUSE_ADDMM", "B_TRANSPOSED", "M", "N", "K"],
+        key=["FUSE_ADDMM", "READ_BIAS", "B_TRANSPOSED", "M", "N", "K"],
         strategy=[
+            "default",
             "default",
             "default",
             _ppu_bucket_strategy,
@@ -835,6 +845,7 @@ if HAS_PPU_TLE:
         stride_bias_m,
         stride_bias_n,
         FUSE_ADDMM: tl.constexpr,
+        READ_BIAS: tl.constexpr,
         B_TRANSPOSED: tl.constexpr,
         BLOCK_M: tl.constexpr,
         BLOCK_K: tl.constexpr,
@@ -861,7 +872,7 @@ if HAS_PPU_TLE:
             )
             acc += tl.sum(a.to(tl.float32) * b.to(tl.float32)[None, :], axis=1)
         result = alpha * acc
-        if FUSE_ADDMM:
+        if READ_BIAS:
             bias = tl.load(
                 Bias + rows * stride_bias_m + pid_n * stride_bias_n,
                 mask=row_mask,
@@ -877,8 +888,9 @@ if HAS_PPU_TLE:
     @libentry()
     @libtuner(
         configs=_ppu_grouped_row_gemv_configs(),
-        key=["FUSE_ADDMM", "B_TRANSPOSED", "M", "N", "K"],
+        key=["FUSE_ADDMM", "READ_BIAS", "B_TRANSPOSED", "M", "N", "K"],
         strategy=[
+            "default",
             "default",
             "default",
             _ppu_bucket_strategy,
@@ -912,6 +924,7 @@ if HAS_PPU_TLE:
         stride_bias_m,
         stride_bias_n,
         FUSE_ADDMM: tl.constexpr,
+        READ_BIAS: tl.constexpr,
         B_TRANSPOSED: tl.constexpr,
         BLOCK_M: tl.constexpr,
         BLOCK_K: tl.constexpr,
@@ -943,7 +956,7 @@ if HAS_PPU_TLE:
             # scalar outer product for every row.
             acc = tl.dot(a, b, acc=acc, out_dtype=tl.float32)
         result = alpha * acc
-        if FUSE_ADDMM:
+        if READ_BIAS:
             bias = tl.load(
                 Bias + rows[:, None] * stride_bias_m + cols[None, :] * stride_bias_n,
                 mask=row_mask[:, None] & col_mask[None, :],
@@ -959,8 +972,9 @@ if HAS_PPU_TLE:
     @libentry()
     @libtuner(
         configs=_ppu_mm_configs(),
-        key=["FUSE_ADDMM", "B_TRANSPOSED", "aiu_load_mask", "M", "N", "K"],
+        key=["FUSE_ADDMM", "READ_BIAS", "B_TRANSPOSED", "aiu_load_mask", "M", "N", "K"],
         strategy=[
+            "default",
             "default",
             "default",
             "default",
@@ -1021,6 +1035,7 @@ if HAS_PPU_TLE:
         EVEN_M: tl.constexpr,
         EVEN_N: tl.constexpr,
         FUSE_ADDMM: tl.constexpr,
+        READ_BIAS: tl.constexpr,
     ):
         pid = tl.program_id(0)
         grid_m = tl.cdiv(M, BLOCK_M)
@@ -1067,13 +1082,15 @@ if HAS_PPU_TLE:
             EVEN_M,
             EVEN_N,
             FUSE_ADDMM,
+            READ_BIAS,
         )
 
     @libentry()
     @libtuner(
         configs=_ppu_narrow_n_configs(),
-        key=["FUSE_ADDMM", "B_TRANSPOSED", "aiu_load_mask", "M", "N", "K"],
+        key=["FUSE_ADDMM", "READ_BIAS", "B_TRANSPOSED", "aiu_load_mask", "M", "N", "K"],
         strategy=[
+            "default",
             "default",
             "default",
             "default",
@@ -1127,6 +1144,7 @@ if HAS_PPU_TLE:
         FULL_N_TILES: tl.constexpr,
         EVEN_M: tl.constexpr,
         FUSE_ADDMM: tl.constexpr,
+        READ_BIAS: tl.constexpr,
     ):
         pid = tl.program_id(0)
         grid_n = tl.cdiv(N, BLOCK_N)
@@ -1168,13 +1186,15 @@ if HAS_PPU_TLE:
             EVEN_M,
             False,
             FUSE_ADDMM,
+            READ_BIAS,
         )
 
     @libentry()
     @libtuner(
         configs=_ppu_small_m_configs(),
-        key=["FUSE_ADDMM", "B_TRANSPOSED", "aiu_load_mask", "M", "N", "K"],
+        key=["FUSE_ADDMM", "READ_BIAS", "B_TRANSPOSED", "aiu_load_mask", "M", "N", "K"],
         strategy=[
+            "default",
             "default",
             "default",
             "default",
@@ -1227,6 +1247,7 @@ if HAS_PPU_TLE:
         FULL_N_TILES: tl.constexpr,
         EVEN_N: tl.constexpr,
         FUSE_ADDMM: tl.constexpr,
+        READ_BIAS: tl.constexpr,
     ):
         # M is deliberately represented by a literal physical tile.  AABS may
         # shrink tunable block sizes to the runtime tensor extent; for M < 16
@@ -1272,6 +1293,7 @@ if HAS_PPU_TLE:
             False,
             EVEN_N,
             FUSE_ADDMM,
+            READ_BIAS,
         )
 
     @libentry()
@@ -1279,6 +1301,7 @@ if HAS_PPU_TLE:
         configs=_ppu_mid_m_configs(),
         key=[
             "FUSE_ADDMM",
+            "READ_BIAS",
             "B_TRANSPOSED",
             "GROUPED_ROWS",
             "aiu_load_mask",
@@ -1287,6 +1310,7 @@ if HAS_PPU_TLE:
             "K",
         ],
         strategy=[
+            "default",
             "default",
             "default",
             "default",
@@ -1342,6 +1366,7 @@ if HAS_PPU_TLE:
         FULL_N_TILES: tl.constexpr,
         EVEN_N: tl.constexpr,
         FUSE_ADDMM: tl.constexpr,
+        READ_BIAS: tl.constexpr,
     ):
         """Compute one partial-M tile as BM32 or two B-sharing BM16 dots."""
         if not GROUPED_ROWS:
@@ -1382,6 +1407,7 @@ if HAS_PPU_TLE:
                 False,
                 EVEN_N,
                 FUSE_ADDMM,
+                READ_BIAS,
             )
             return
 
@@ -1478,7 +1504,7 @@ if HAS_PPU_TLE:
         mask1 = row1_mask[:, None] & col_mask[None, :]
         out0 = alpha * acc0
         out1 = alpha * acc1
-        if FUSE_ADDMM:
+        if READ_BIAS:
             bias0 = tl.load(
                 Bias + rows0[:, None] * stride_bias_m + cols[None, :] * stride_bias_n,
                 mask=mask0,
@@ -1649,23 +1675,33 @@ if HAS_PPU_TLE:
         # it out of the tuner key lets a winner tuned for split=2 be reused
         # for split=4/8, which is both a performance error and a cache
         # correctness hazard for the workspace layout.
-        key=["n_elements", "SPLIT_K"],
-        strategy=["default", "default"],
+        key=["FUSE_ADDMM", "READ_BIAS", "n_elements", "SPLIT_K"],
+        strategy=["default", "default", "default", "default"],
         warmup=5,
         rep=10,
         flagtune_op_name="mm",
         flagtune_expand_op_name="mm_ppu_split_k_reduce",
         flagtune_yaml_path=EXPAND_CONFIG_FILENAME,
     )
+    @triton.heuristics(values={"EVEN_N": _full_reduction_vectors})
     @triton.jit
     def mm_split_k_reduce_kernel_ppu(
         Workspace,
         C,
+        Bias,
+        alpha,
+        beta,
+        M,
+        N,
         n_elements,
+        stride_bias_m,
+        stride_bias_n,
         SPLIT_K: tl.constexpr,
         BLOCK: tl.constexpr,
         VEC: tl.constexpr,
         EVEN_N: tl.constexpr,
+        FUSE_ADDMM: tl.constexpr,
+        READ_BIAS: tl.constexpr,
     ):
         offsets = (
             tl.program_id(0).to(tl.int64) * BLOCK * VEC
@@ -1690,18 +1726,31 @@ if HAS_PPU_TLE:
                 acc += tl.load(workspace_ptrs)
             else:
                 acc += tl.load(workspace_ptrs, mask=mask, other=0.0)
+        if FUSE_ADDMM:
+            acc *= alpha
+            if READ_BIAS:
+                bias_ptrs = (
+                    Bias
+                    + (offsets // N) * stride_bias_m
+                    + (offsets % N) * stride_bias_n
+                )
+                bias = tl.load(bias_ptrs, mask=mask, other=0.0).to(tl.float32)
+                acc += beta * bias
         if EVEN_N:
             tl.store(C + offsets, acc.to(C.dtype.element_ty))
         else:
             tl.store(C + offsets, acc.to(C.dtype.element_ty), mask=mask)
 
 
-def _can_use_ppu_mm(a: torch.Tensor, b: torch.Tensor, out: torch.Tensor) -> bool:
+def _can_use_ppu_gemm(
+    a: torch.Tensor, b: torch.Tensor, out: torch.Tensor, *, output_dtype: torch.dtype
+) -> bool:
     if not (
         HAS_PPU_TLE
         and a.ndim == b.ndim == out.ndim == 2
         and a.dtype in (torch.float16, torch.bfloat16)
-        and b.dtype == out.dtype == a.dtype
+        and b.dtype == a.dtype
+        and out.dtype == output_dtype
         and a.device == b.device == out.device
         and a.is_contiguous()
         and _is_supported_ppu_b_layout(a, b)
@@ -1712,6 +1761,10 @@ def _can_use_ppu_mm(a: torch.Tensor, b: torch.Tensor, out: torch.Tensor) -> bool
     M, K = a.shape
     b_k, N = b.shape
     return K == b_k and out.shape == (M, N) and M > 0 and N > 0 and K > 0
+
+
+def _can_use_ppu_mm(a: torch.Tensor, b: torch.Tensor, out: torch.Tensor) -> bool:
+    return _can_use_ppu_gemm(a, b, out, output_dtype=a.dtype)
 
 
 def _should_use_ppu_mm_gemv(M: int, N: int, K: int) -> bool:
@@ -1800,6 +1853,7 @@ def _run_ppu_gemv_mm(
             stride_out_row,
             stride_bias_row,
             FUSE_ADDMM=fuse_addmm,
+            READ_BIAS=fuse_addmm and beta != 0,
             TRANSPOSED=transposed,
             B_TRANSPOSED=_b_transposed_layout(b),
         )
@@ -1854,6 +1908,7 @@ def _run_ppu_mm(
             or (not fuse_addmm and _is_deep_fixed_row(M, width, K) and M % 32 == 0),
             EVEN_N=width % 1024 == 0,
             FUSE_ADDMM=fuse_addmm,
+            READ_BIAS=fuse_addmm and beta != 0,
         )
 
     with torch_device_fn.device(a.device):
@@ -2016,6 +2071,11 @@ def _select_ppu_mm_route(M: int, N: int, K: int, *, b_transposed: bool) -> _PPUM
         return _PPUMMRoute.NARROW_N
     if _prefer_grouped_mid_m(1, M, N, K) or _prefer_deep_mid_m(1, M, N, K):
         return _PPUMMRoute.PARTIAL_M_GEMM
+    # In the 33..64-column band, two or three native K tiles do not repay a
+    # split workspace and reducer launch. Keep this unbatched route on the
+    # direct narrow-N kernel; the batched split-K model is unchanged.
+    if 32 < N <= 64 and 2 * _GEMV_REDUCTION_TILE <= K < 4 * _GEMV_REDUCTION_TILE:
+        return _PPUMMRoute.NARROW_N
     if _should_use_split_k_mm(M, N, K):
         # Once NT B uses a native column-major AIU descriptor, ordinary GEMM
         # no longer needs workspace K-parallelism for N>64. Representative
@@ -2095,123 +2155,9 @@ def _run_ppu_narrow_n_mm(
             EVEN_K=K % 128 == 0,
             EVEN_M=M % 512 == 0,
             FUSE_ADDMM=fuse_addmm,
+            READ_BIAS=fuse_addmm and beta != 0,
         )
     return out
-
-
-def _run_ppu_addmm(
-    bias: torch.Tensor,
-    a: torch.Tensor,
-    b: torch.Tensor,
-    out: torch.Tensor,
-    alpha,
-    beta,
-) -> torch.Tensor:
-    """Run the PPU GEMM with an in-kernel affine bias epilogue."""
-    M, K = a.shape
-    _, N = b.shape
-    if M <= _SMALL_M_TILE and _prefer_small_m_kernel(1, M, N, K):
-        return _run_partial_m_ppu_mm(
-            a, b, out, bias=bias, alpha=alpha, beta=beta
-        )
-    if N <= 32 and K >= 2 * _GEMV_REDUCTION_TILE and M > _SMALL_M_TILE:
-        return _run_ppu_narrow_n_mm(
-            a, b, out, bias=bias, alpha=alpha, beta=beta
-        )
-    if _should_use_row_vector_narrow_mm(M, N, K):
-        return _run_ppu_narrow_n_mm(
-            a,
-            b,
-            out,
-            bias=bias,
-            alpha=alpha,
-            beta=beta,
-        )
-    if _should_use_grouped_row_gemv(M, N, K):
-        return _run_ppu_grouped_row_gemv_mm(
-            a,
-            b,
-            out,
-            bias=bias,
-            alpha=alpha,
-            beta=beta,
-        )
-    if _should_use_multi_row_gemv(M, N, K):
-        return _run_ppu_multi_row_gemv_mm(
-            a,
-            b,
-            out,
-            bias=bias,
-            alpha=alpha,
-            beta=beta,
-        )
-    if M < 32 and N > 1024:
-        return _run_ppu_narrow_n_mm(
-            a,
-            b,
-            out,
-            bias=bias,
-            alpha=alpha,
-            beta=beta,
-        )
-    if N <= 64:
-        return _run_ppu_narrow_n_mm(
-            a,
-            b,
-            out,
-            bias=bias,
-            alpha=alpha,
-            beta=beta,
-        )
-    # The fixed-row family is useful for genuinely narrow outputs where one
-    # BN tile covers the whole launch.  Keep this width guard ahead of the
-    # low-output regular family; wider outputs retain the measured regular
-    # path so that a masked 16-row tile cannot consume many tiny programs.
-    if N <= 1024 and _prefer_small_m_kernel(1, M, N, K):
-        return _run_partial_m_ppu_mm(
-            a,
-            b,
-            out,
-            bias=bias,
-            alpha=alpha,
-            beta=beta,
-        )
-    if _is_low_output_parallelism(M, N, K):
-        return _run_ppu_mm(
-            a,
-            b,
-            out,
-            bias=bias,
-            alpha=alpha,
-            beta=beta,
-            allow_aligned_a=False,
-        )
-    if _prefer_small_m_kernel(1, M, N, K):
-        return _run_partial_m_ppu_mm(
-            a,
-            b,
-            out,
-            bias=bias,
-            alpha=alpha,
-            beta=beta,
-        )
-    if M <= 32:
-        return _run_partial_m_ppu_mm(
-            a,
-            b,
-            out,
-            bias=bias,
-            alpha=alpha,
-            beta=beta,
-        )
-    return _run_ppu_mm(
-        a,
-        b,
-        out,
-        bias=bias,
-        alpha=alpha,
-        beta=beta,
-    )
 
 
 def _run_partial_m_ppu_mm(
@@ -2231,7 +2177,7 @@ def _run_partial_m_ppu_mm(
     partial_meta = (
         {}
         if M <= _SMALL_M_TILE
-        else {"GROUPED_ROWS": not fuse_addmm and _prefer_grouped_mid_m(1, M, N, K)}
+        else {"GROUPED_ROWS": _prefer_grouped_mid_m(1, M, N, K)}
     )
     grid = lambda META: (triton.cdiv(N, META["BLOCK_N"]),)
     with torch_device_fn.device(a.device):
@@ -2258,6 +2204,7 @@ def _run_partial_m_ppu_mm(
             EVEN_K=K % 128 == 0,
             EVEN_N=N % 1024 == 0,
             FUSE_ADDMM=fuse_addmm,
+            READ_BIAS=fuse_addmm and beta != 0,
             **partial_meta,
         )
     return out
@@ -2297,6 +2244,7 @@ def _run_ppu_multi_row_gemv_mm(
             expanded_bias.stride(0),
             expanded_bias.stride(1),
             FUSE_ADDMM=fuse_addmm,
+            READ_BIAS=fuse_addmm and beta != 0,
             B_TRANSPOSED=_b_transposed_layout(b),
         )
     return out
@@ -2337,6 +2285,7 @@ def _run_ppu_narrow_columns_mm(
             expanded_bias.stride(0),
             expanded_bias.stride(1),
             FUSE_ADDMM=fuse_addmm,
+            READ_BIAS=fuse_addmm and beta != 0,
             B_TRANSPOSED=_b_transposed_layout(b),
         )
     return out
@@ -2379,6 +2328,7 @@ def _run_ppu_grouped_row_gemv_mm(
             expanded_bias.stride(0),
             expanded_bias.stride(1),
             FUSE_ADDMM=fuse_addmm,
+            READ_BIAS=fuse_addmm and beta != 0,
             B_TRANSPOSED=_b_transposed_layout(b),
         )
     return out
@@ -2390,11 +2340,20 @@ def _should_use_split_k_mm(M: int, N: int, K: int) -> bool:
 
 
 def _run_split_k_mm(
-    a: torch.Tensor, b: torch.Tensor, out: torch.Tensor
+    a: torch.Tensor,
+    b: torch.Tensor,
+    out: torch.Tensor,
+    *,
+    bias: torch.Tensor | None = None,
+    alpha=1.0,
+    beta=0.0,
 ) -> torch.Tensor:
     M, K = a.shape
     _, N = b.shape
     b_transposed = _b_transposed_layout(b)
+    fuse_addmm = bias is not None
+    read_bias = fuse_addmm and beta != 0
+    expanded_bias = bias.broadcast_to((M, N)) if read_bias else out
     # The tuner updates ``best_config`` inside the kernel launch.  It may still
     # contain the winner for a previous shape before this call, so allocate the
     # bounded maximum up front and read the active split count afterwards.
@@ -2434,12 +2393,17 @@ def _run_split_k_mm(
         mm_split_k_reduce_kernel_ppu[reduce_grid](
             workspace,
             out,
+            expanded_bias,
+            alpha,
+            beta,
+            M,
+            N,
             M * N,
+            expanded_bias.stride(0),
+            expanded_bias.stride(1),
             SPLIT_K=split_k,
-            # Both reducer candidates process 1024 contiguous elements
-            # (128x8 or 256x4).  Complete vectors can skip a mask on each
-            # workspace load/store in the common aligned M*N cases.
-            EVEN_N=(M * N) % 1024 == 0,
+            FUSE_ADDMM=fuse_addmm,
+            READ_BIAS=read_bias,
         )
     return out
 
@@ -2455,19 +2419,70 @@ _PPU_MM_RUNNERS = {
 }
 
 
-def _dispatch_ppu_mm(a: torch.Tensor, b: torch.Tensor, out: torch.Tensor):
-    """Validate once, select one symbolic route, then invoke one runner."""
-    if not _can_use_ppu_mm(a, b, out):
+def _select_ppu_gemm_route(
+    M: int,
+    N: int,
+    K: int,
+    *,
+    b_transposed: bool,
+    fuse_bias: bool,
+    fp32_output: bool,
+) -> _PPUMMRoute:
+    route = _select_ppu_mm_route(M, N, K, b_transposed=b_transposed)
+    # Bias fusion or an FP32 output changes the wide NT crossover: a physical
+    # BM16 tile avoids carrying mostly masked BM64 rows through the epilogue.
+    # The original BF16/FP16 MM route remains unchanged.
+    if (
+        (fuse_bias or fp32_output)
+        and b_transposed
+        and 1 < M <= _SMALL_M_TILE
+        and N >= 8 * _GEMV_REDUCTION_TILE
+        and K >= 2 * _GEMV_REDUCTION_TILE
+    ):
+        return _PPUMMRoute.PARTIAL_M_GEMM
+    # With bias fusion, a grid of 16..20 physical row tiles in the deep
+    # 64-column NT regime is cheaper on direct narrow-N than on a split
+    # workspace. Larger row grids keep the shared MM split-K decision.
+    if (
+        route is _PPUMMRoute.SPLIT_K
+        and fuse_bias
+        and b_transposed
+        and 32 < N <= 64
+        and 16 <= triton.cdiv(M, 64) <= 20
+    ):
+        return _PPUMMRoute.NARROW_N
+    return route
+
+
+def _dispatch_ppu_gemm(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    out: torch.Tensor,
+    *,
+    bias: torch.Tensor | None = None,
+    alpha=1.0,
+    beta=0.0,
+    output_dtype: torch.dtype | None = None,
+):
+    """Validate, select the MM route, then run its shared kernel family."""
+    if not _can_use_ppu_gemm(a, b, out, output_dtype=output_dtype or a.dtype):
         return None
     M, K = a.shape
     N = b.shape[1]
-    route = _select_ppu_mm_route(
+    b_transposed = _b_transposed_layout(b)
+    route = _select_ppu_gemm_route(
         M,
         N,
         K,
-        b_transposed=_b_transposed_layout(b),
+        b_transposed=b_transposed,
+        fuse_bias=bias is not None,
+        fp32_output=out.dtype == torch.float32,
     )
-    return _PPU_MM_RUNNERS[route](a, b, out)
+    return _PPU_MM_RUNNERS[route](a, b, out, bias=bias, alpha=alpha, beta=beta)
+
+
+def _dispatch_ppu_mm(a: torch.Tensor, b: torch.Tensor, out: torch.Tensor):
+    return _dispatch_ppu_gemm(a, b, out)
 
 
 def mm(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
@@ -2531,6 +2546,7 @@ def _mv(inp: torch.Tensor, vec: torch.Tensor) -> torch.Tensor:
             out.stride(0),
             out.stride(0),
             FUSE_ADDMM=False,
+            READ_BIAS=False,
             TRANSPOSED=False,
             B_TRANSPOSED=False,
         )

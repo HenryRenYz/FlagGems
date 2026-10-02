@@ -42,10 +42,14 @@ else:
 @pytest.mark.router_gemm
 @pytest.mark.parametrize("M, N, K", ROUTER_SHAPES)
 @pytest.mark.parametrize("in_dtype", INPUT_DTYPES)
-def test_router_gemm_accuracy(M, N, K, in_dtype):
+@pytest.mark.parametrize("b_layout", ("nn", "nt"))
+def test_router_gemm_accuracy(M, N, K, in_dtype, b_layout):
     """Test that router_gemm (bf16 input -> fp32 output) matches fp32 reference."""
     x = torch.randn((M, K), dtype=in_dtype, device=flag_gems.device)
-    weight = torch.randn((N, K), dtype=in_dtype, device=flag_gems.device)
+    if b_layout == "nn":
+        weight = torch.randn((K, N), dtype=in_dtype, device=flag_gems.device).t()
+    else:
+        weight = torch.randn((N, K), dtype=in_dtype, device=flag_gems.device)
 
     ref_x = utils.to_reference(x, True)
     ref_weight = utils.to_reference(weight, True)
@@ -69,3 +73,22 @@ def test_router_gemm_output_dtype(M, N, K):
     with flag_gems.use_gems():
         out_fp32 = flag_gems.router_gemm(x, weight)
         assert out_fp32.dtype == torch.float32
+
+
+@pytest.mark.router_gemm
+@pytest.mark.skipif(
+    flag_gems.vendor_name != "thead", reason="T-Head split-K PPU GEMM coverage"
+)
+@pytest.mark.parametrize("b_layout", ("nn", "nt"))
+def test_thead_router_gemm_split_k(b_layout):
+    M, N, K = 400, 64, 7168
+    x = torch.randn((M, K), dtype=torch.bfloat16, device=flag_gems.device)
+    if b_layout == "nn":
+        weight = torch.randn((K, N), dtype=torch.bfloat16, device=flag_gems.device).t()
+    else:
+        weight = torch.randn((N, K), dtype=torch.bfloat16, device=flag_gems.device)
+    reference = torch.mm(x.float(), weight.float().t())
+    with flag_gems.use_gems():
+        result = flag_gems.router_gemm(x, weight)
+    assert result.dtype == torch.float32
+    utils.gems_assert_close(result, reference, torch.float32, reduce_dim=K)

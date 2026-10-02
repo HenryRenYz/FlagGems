@@ -22,12 +22,7 @@ from flag_gems.ops.addmm import addmm as _generic_addmm
 from flag_gems.ops.addmm import addmm_out as _generic_addmm_out
 from flag_gems.utils import broadcastable_to
 
-from .mm import (
-    _can_use_ppu_mm,
-    _run_ppu_addmm,
-    _run_ppu_gemv_mm,
-    _should_use_ppu_mm_gemv,
-)
+from .mm import _can_use_ppu_mm, _dispatch_ppu_gemm
 
 logger = logging.getLogger(__name__)
 
@@ -44,18 +39,7 @@ def _can_use_ppu_addmm(bias, mat1, mat2, out) -> bool:
 
 
 def _run_ppu_addmm_dispatch(bias, mat1, mat2, out, alpha, beta):
-    M, K = mat1.shape
-    N = mat2.shape[1]
-    if (M == 1 or N == 1) and _should_use_ppu_mm_gemv(M, N, K):
-        return _run_ppu_gemv_mm(
-            mat1,
-            mat2,
-            out,
-            bias=bias,
-            alpha=alpha,
-            beta=beta,
-        )
-    return _run_ppu_addmm(bias, mat1, mat2, out, alpha, beta)
+    return _dispatch_ppu_gemm(mat1, mat2, out, bias=bias, alpha=alpha, beta=beta)
 
 
 def addmm(bias, mat1, mat2, *, beta=1, alpha=1):
@@ -67,9 +51,7 @@ def addmm(bias, mat1, mat2, *, beta=1, alpha=1):
             dtype=mat1.dtype,
         )
         if _can_use_ppu_addmm(bias, mat1, mat2, out):
-            return _run_ppu_addmm_dispatch(
-                bias, mat1, mat2, out, alpha, beta
-            )
+            return _run_ppu_addmm_dispatch(bias, mat1, mat2, out, alpha, beta)
     return _generic_addmm(bias, mat1, mat2, beta=beta, alpha=alpha)
 
 

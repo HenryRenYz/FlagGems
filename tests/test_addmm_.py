@@ -67,3 +67,46 @@ def test_addmm_(M, N, K, scalar, dtype):
 
     if flag_gems.vendor_name == "mthreads":
         del os.environ["MUSA_ENABLE_SQMMA"]
+
+
+@pytest.mark.addmm_
+@pytest.mark.skipif(flag_gems.vendor_name != "thead", reason="T-Head PPU GEMM")
+@pytest.mark.parametrize("M, N, K", [(1, 128, 256), (64, 128, 128), (256, 64, 1024)])
+@pytest.mark.parametrize("b_transposed", [False, True])
+def test_thead_addmm_inplace_gemm(M, N, K, b_transposed):
+    self = torch.randn((M, N), device=flag_gems.device, dtype=torch.bfloat16)
+    mat1 = torch.randn((M, K), device=flag_gems.device, dtype=torch.bfloat16)
+    if b_transposed:
+        mat2 = torch.randn((N, K), device=flag_gems.device, dtype=torch.bfloat16).t()
+    else:
+        mat2 = torch.randn((K, N), device=flag_gems.device, dtype=torch.bfloat16)
+    reference = torch.addmm(self.clone(), mat1, mat2, alpha=1.25, beta=0.5)
+    address = self.data_ptr()
+
+    result = flag_gems.addmm_(self, mat1, mat2, alpha=1.25, beta=0.5)
+
+    assert result.data_ptr() == self.data_ptr() == address
+    torch.testing.assert_close(self, reference, rtol=0.05, atol=1)
+
+
+@pytest.mark.addmm_
+@pytest.mark.skipif(flag_gems.vendor_name != "thead", reason="T-Head PPU GEMM")
+def test_thead_addmm_inplace_beta_zero_and_input_alias():
+    self = torch.full(
+        (64, 64), float("nan"), device=flag_gems.device, dtype=torch.bfloat16
+    )
+    mat1 = torch.randn((64, 64), device=flag_gems.device, dtype=torch.bfloat16)
+    mat2 = torch.randn((64, 64), device=flag_gems.device, dtype=torch.bfloat16)
+    reference = torch.addmm(self.clone(), mat1, mat2, beta=0)
+    flag_gems.addmm_(self, mat1, mat2, beta=0)
+    assert torch.isfinite(self).all()
+    torch.testing.assert_close(self, reference, rtol=0.05, atol=1)
+
+    for left_alias in (True, False):
+        self = torch.randn((64, 64), device=flag_gems.device, dtype=torch.bfloat16)
+        other = torch.randn((64, 64), device=flag_gems.device, dtype=torch.bfloat16)
+        a, b = (self, other) if left_alias else (other, self)
+        reference = torch.addmm(self.clone(), a.clone(), b.clone())
+        result = flag_gems.addmm_(self, a, b)
+        assert result.data_ptr() == self.data_ptr()
+        torch.testing.assert_close(self, reference, rtol=0.05, atol=1)

@@ -20,10 +20,10 @@ import torch
 
 from flag_gems.ops.baddbmm import baddbmm as _generic_baddbmm
 from flag_gems.ops.baddbmm import baddbmm_out as _generic_baddbmm_out
-from flag_gems.ops.baddbmm import compute_A_grad, compute_B_grad, compute_bias_grad
+from flag_gems.ops.baddbmm_ import baddbmm_ as _generic_baddbmm_
 from flag_gems.utils import broadcastable_to
 
-from .bmm import _can_use_ppu_bmm, _can_use_ppu_bmm_inputs, _run_ppu_bmm
+from .bmm import _can_use_ppu_bmm, _can_use_ppu_bmm_inputs, _dispatch_ppu_bmm
 
 logger = logging.getLogger(__name__)
 
@@ -39,64 +39,26 @@ def _can_use_ppu_baddbmm(bias, A, B, out=None) -> bool:
         return False
     target_shape = (A.shape[0], A.shape[1], B.shape[2])
     return broadcastable_to(bias.shape, target_shape) and (
-        _can_use_ppu_bmm_inputs(A, B)
-        if out is None
-        else _can_use_ppu_bmm(A, B, out)
+        _can_use_ppu_bmm_inputs(A, B) if out is None else _can_use_ppu_bmm(A, B, out)
     )
-
-
-class _BaddbmmFunction(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, bias, A, B, beta, alpha):
-        ctx.save_for_backward(A, B, bias)
-        ctx.alpha = alpha
-        ctx.beta = beta
-        out = torch.empty(
-            (A.shape[0], A.shape[1], B.shape[2]),
-            dtype=A.dtype,
-            device=A.device,
-        )
-        return _run_ppu_bmm(
-            A,
-            B,
-            out,
-            bias=bias,
-            alpha=alpha,
-            beta=beta,
-        )
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        A, B, bias = ctx.saved_tensors
-        grad_bias = (
-            compute_bias_grad(grad_output, ctx.beta, bias)
-            if ctx.needs_input_grad[0]
-            else None
-        )
-        grad_A = (
-            compute_A_grad(grad_output, B, ctx.alpha)
-            if ctx.needs_input_grad[1]
-            else None
-        )
-        grad_B = (
-            compute_B_grad(A, grad_output, ctx.alpha)
-            if ctx.needs_input_grad[2]
-            else None
-        )
-        return grad_bias, grad_A, grad_B, None, None
 
 
 def baddbmm(bias, A, B, beta=1.0, alpha=1.0):
     logger.debug("GEMS_THEAD BADDBMM")
     if _can_use_ppu_baddbmm(bias, A, B):
-        return _BaddbmmFunction.apply(bias, A, B, beta, alpha)
+        out = torch.empty(
+            (A.shape[0], A.shape[1], B.shape[2]),
+            dtype=A.dtype,
+            device=A.device,
+        )
+        return _dispatch_ppu_bmm(A, B, out, bias=bias, alpha=alpha, beta=beta)
     return _generic_baddbmm(bias, A, B, beta=beta, alpha=alpha)
 
 
 def baddbmm_out(bias, A, B, *, beta=1.0, alpha=1.0, out):
     logger.debug("GEMS_THEAD BADDBMM_OUT")
     if _can_use_ppu_baddbmm(bias, A, B, out):
-        return _run_ppu_bmm(
+        return _dispatch_ppu_bmm(
             A,
             B,
             out,
@@ -107,4 +69,19 @@ def baddbmm_out(bias, A, B, *, beta=1.0, alpha=1.0, out):
     return _generic_baddbmm_out(bias, A, B, beta=beta, alpha=alpha, out=out)
 
 
-__all__ = ["baddbmm", "baddbmm_out"]
+def baddbmm_(self, A, B, *, beta=1.0, alpha=1.0):
+    """Fuse the in-place bias read and output write when shapes match."""
+    logger.debug("GEMS_THEAD BADDBMM_")
+    if (
+        self.ndim == 3
+        and A.ndim == B.ndim == 3
+        and self.shape == (A.shape[0], A.shape[1], B.shape[2])
+        and self.is_contiguous()
+        and not self.requires_grad
+        and _can_use_ppu_baddbmm(self, A, B, self)
+    ):
+        return _dispatch_ppu_bmm(A, B, self, bias=self, alpha=alpha, beta=beta)
+    return _generic_baddbmm_(self, A, B, beta=beta, alpha=alpha)
+
+
+__all__ = ["baddbmm", "baddbmm_out", "baddbmm_"]

@@ -18,9 +18,11 @@ import logging
 import torch
 import triton
 
+from flag_gems.ops.addmm import addmm as _generic_addmm
 from flag_gems.ops.addmm import addmm_kernel
 from flag_gems.runtime import torch_device_fn
-from flag_gems.utils import broadcastable_to
+
+from .addmm import _can_use_ppu_addmm, _run_ppu_addmm_dispatch
 
 logger = logging.getLogger(__name__)
 
@@ -28,13 +30,22 @@ logger = logging.getLogger(__name__)
 def addmm_(self, mat1, mat2, *, beta=1, alpha=1):
     assert self.dtype.is_floating_point, "Only floating-point dtypes are supported"
     assert mat1.shape[1] == mat2.shape[0], "Incompatible dimensions"
-    assert broadcastable_to(
-        self.shape, (mat1.shape[0], mat2.shape[1])
-    ), "Incompatible input shape"
+    assert self.shape == (mat1.shape[0], mat2.shape[1]), "Incompatible input shape"
 
     logger.debug("GEMS_THEAD ADDMM_")
     M, K = mat1.shape
     _, N = mat2.shape
+
+    # Matrix inputs must stay unchanged until all programs finish.
+    if torch._C._overlaps(self, mat1) or torch._C._overlaps(self, mat2):
+        result = _generic_addmm(self, mat1, mat2, beta=beta, alpha=alpha)
+        self.copy_(result)
+        return self
+    if _can_use_ppu_addmm(self, mat1, mat2, self):
+        # Autotuning can write ``self`` repeatedly before the final launch.
+        # Preserve the original bias across candidate measurements.
+        bias = self if beta == 0 else self.clone()
+        return _run_ppu_addmm_dispatch(bias, mat1, mat2, self, alpha, beta)
 
     # In-place fused matmul + bias-add: launch the fused addmm kernel writing its
     # result directly into ``self`` instead of allocating a temporary output and

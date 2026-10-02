@@ -1555,7 +1555,7 @@ def _run_ppu_bmm_main(
     beta,
     fuse_bias,
     *,
-    kernel=bmm_kernel_ppu if HAS_PPU_TLE else None
+    kernel=bmm_kernel_ppu if HAS_PPU_TLE else None,
 ):
     batch, M, K = A.shape
     N = B.shape[2]

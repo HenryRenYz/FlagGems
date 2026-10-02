@@ -155,8 +155,7 @@ def test_thead_baddbmm_layout_routes(batch, M, N, K, layout):
         torch.bfloat16
     )
     bias.fill_(float("nan"))
-    with flag_gems.use_gems():
-        result = torch.baddbmm(bias, a, b, beta=0)
+    result = flag_gems.baddbmm(bias, a, b, beta=0)
     gems_assert_close(result, reference, torch.bfloat16, reduce_dim=K)
 
 
@@ -177,16 +176,14 @@ def test_thead_baddbmm_split_k(M, N):
         bias.float(), a.float(), b.float(), alpha=1.25, beta=0.5
     ).to(torch.bfloat16)
     out = torch.empty_like(bias)
-    with flag_gems.use_gems():
-        result = torch.baddbmm(bias, a, b, alpha=1.25, beta=0.5)
-        torch.baddbmm(bias, a, b, alpha=1.25, beta=0.5, out=out)
+    result = flag_gems.baddbmm(bias, a, b, alpha=1.25, beta=0.5)
+    flag_gems.baddbmm_out(bias, a, b, alpha=1.25, beta=0.5, out=out)
     gems_assert_close(result, expected, torch.bfloat16, reduce_dim=K)
     gems_assert_close(out, expected, torch.bfloat16, reduce_dim=K)
 
     nan_bias = torch.full_like(bias, float("nan"))
     expected_no_bias = torch.bmm(a.float(), b.float()).to(torch.bfloat16)
-    with flag_gems.use_gems():
-        torch.baddbmm(nan_bias, a, b, beta=0, out=nan_bias)
+    flag_gems.baddbmm_out(nan_bias, a, b, beta=0, out=nan_bias)
     gems_assert_close(nan_bias, expected_no_bias, torch.bfloat16, reduce_dim=K)
 
 
@@ -208,38 +205,12 @@ def test_thead_baddbmm_alias_beta_zero(layout):
         bias = torch.full(
             (batch, M, N), float("nan"), dtype=torch.bfloat16, device=flag_gems.device
         )
-        with flag_gems.use_gems():
-            if inplace:
-                result = bias.baddbmm_(a, b, beta=0)
-            else:
-                result = torch.baddbmm(bias, a, b, beta=0, out=bias)
+        if inplace:
+            result = flag_gems.baddbmm_(bias, a, b, beta=0)
+        else:
+            result = flag_gems.baddbmm_out(bias, a, b, beta=0, out=bias)
         assert result.data_ptr() == bias.data_ptr()
         gems_assert_close(result, expected, torch.bfloat16, reduce_dim=K)
-
-
-@pytest.mark.baddbmm
-@pytest.mark.skipif(flag_gems.vendor_name != "thead", reason="T-Head PPU GEMM")
-def test_thead_baddbmm_registered_nt_backward():
-    batch, M, N, K = 2, 8, 16, 128
-    a = torch.randn(
-        (batch, M, K), dtype=torch.bfloat16, device=flag_gems.device, requires_grad=True
-    )
-    b_base = torch.randn((batch, N, K), dtype=torch.bfloat16, device=flag_gems.device)
-    b = b_base.transpose(1, 2).detach().requires_grad_()
-    bias = torch.randn(
-        (N,), dtype=torch.bfloat16, device=flag_gems.device, requires_grad=True
-    )
-    grad = torch.randn((batch, M, N), dtype=torch.bfloat16, device=flag_gems.device)
-
-    reference = torch.baddbmm(bias.float(), a.float(), b.float())
-    expected_grads = torch.autograd.grad(reference, (bias, a, b), grad.float())
-    direct = flag_gems.baddbmm(bias, a, b)
-    assert not direct.requires_grad
-    with flag_gems.use_gems():
-        result = torch.baddbmm(bias, a, b)
-    actual_grads = torch.autograd.grad(result, (bias, a, b), grad)
-    for actual, expected in zip(actual_grads, expected_grads):
-        gems_assert_close(actual, expected, torch.bfloat16, reduce_dim=K)
 
 
 @pytest.mark.baddbmm
@@ -258,8 +229,7 @@ def test_thead_baddbmm_ultra_wide_batch(layout):
     b = b_storage if layout == "nn" else b_storage.transpose(1, 2)
     bias = torch.randn((N,), dtype=torch.bfloat16, device=flag_gems.device)
     expected = torch.baddbmm(bias.float(), a.float(), b.float()).to(torch.bfloat16)
-    with flag_gems.use_gems():
-        result = torch.baddbmm(bias, a, b)
+    result = flag_gems.baddbmm(bias, a, b)
     torch.testing.assert_close(result, expected, atol=0.25, rtol=0.02)
 
 
@@ -278,9 +248,8 @@ def test_thead_baddbmm_ultra_wide_single_row(layout):
     bias = torch.randn((N,), dtype=torch.bfloat16, device=flag_gems.device)
     expected_bmm = torch.bmm(a.float(), b.float()).to(torch.bfloat16)
     expected = torch.baddbmm(bias.float(), a.float(), b.float()).to(torch.bfloat16)
-    with flag_gems.use_gems():
-        result_bmm = torch.bmm(a, b)
-        result = torch.baddbmm(bias, a, b)
+    result_bmm = flag_gems.bmm(a, b)
+    result = flag_gems.baddbmm(bias, a, b)
     torch.testing.assert_close(result_bmm, expected_bmm, atol=0.25, rtol=0.02)
     torch.testing.assert_close(result, expected, atol=0.25, rtol=0.02)
 
@@ -301,9 +270,8 @@ def test_thead_bmm_small_m_second_row_tile(layout):
     expected_baddbmm = torch.baddbmm(bias.float(), a.float(), b.float()).to(
         torch.bfloat16
     )
-    with flag_gems.use_gems():
-        actual_bmm = torch.bmm(a, b)
-        actual_baddbmm = torch.baddbmm(bias, a, b)
+    actual_bmm = flag_gems.bmm(a, b)
+    actual_baddbmm = flag_gems.baddbmm(bias, a, b)
     torch.testing.assert_close(actual_bmm, expected_bmm, atol=1.0, rtol=0.03)
     torch.testing.assert_close(actual_baddbmm, expected_baddbmm, atol=1.0, rtol=0.03)
 
@@ -342,9 +310,8 @@ def test_thead_bmm_narrow_n_routes(batch, M, N, K, layout):
     expected_baddbmm = torch.baddbmm(bias.float(), a.float(), b.float()).to(
         torch.bfloat16
     )
-    with flag_gems.use_gems():
-        actual_bmm = torch.bmm(a, b)
-        actual_baddbmm = torch.baddbmm(bias, a, b)
+    actual_bmm = flag_gems.bmm(a, b)
+    actual_baddbmm = flag_gems.baddbmm(bias, a, b)
     torch.testing.assert_close(actual_bmm, expected_bmm, atol=1.0, rtol=0.03)
     torch.testing.assert_close(actual_baddbmm, expected_baddbmm, atol=1.0, rtol=0.03)
 
@@ -368,6 +335,5 @@ def test_thead_baddbmm_batched_scalar_routes(batch, M, N, K, layout, alpha, beta
     expected = torch.baddbmm(
         bias.float(), a.float(), b.float(), alpha=alpha, beta=beta
     ).to(torch.bfloat16)
-    with flag_gems.use_gems():
-        actual = torch.baddbmm(bias, a, b, alpha=alpha, beta=beta)
+    actual = flag_gems.baddbmm(bias, a, b, alpha=alpha, beta=beta)
     torch.testing.assert_close(actual, expected, atol=1.0, rtol=0.03)

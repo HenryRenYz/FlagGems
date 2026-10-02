@@ -88,7 +88,6 @@ def test_thead_router_gemm_split_k(b_layout):
     else:
         weight = torch.randn((N, K), dtype=torch.bfloat16, device=flag_gems.device)
     reference = torch.mm(x.float(), weight.float().t())
-    with flag_gems.use_gems():
-        result = flag_gems.router_gemm(x, weight)
+    result = flag_gems.router_gemm(x, weight)
     assert result.dtype == torch.float32
     utils.gems_assert_close(result, reference, torch.float32, reduce_dim=K)

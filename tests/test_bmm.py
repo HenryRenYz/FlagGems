@@ -136,8 +136,7 @@ def test_thead_bmm_layout_routes(batch, M, N, K, layout):
             (batch, N, K), dtype=torch.bfloat16, device=flag_gems.device
         ).transpose(1, 2)
     reference = torch.bmm(a.float(), b.float()).to(torch.bfloat16)
-    with flag_gems.use_gems():
-        result = torch.bmm(a, b)
+    result = flag_gems.bmm(a, b)
     utils.gems_assert_close(result, reference, torch.bfloat16, reduce_dim=K)
 
 
@@ -155,9 +154,8 @@ def test_thead_bmm_split_k(M, N):
     b = torch.randn((batch, K, N), dtype=torch.bfloat16, device=flag_gems.device)
     expected = torch.bmm(a.float(), b.float()).to(torch.bfloat16)
     out = torch.empty((batch, M, N), dtype=torch.bfloat16, device=flag_gems.device)
-    with flag_gems.use_gems():
-        result = torch.bmm(a, b)
-        torch.bmm(a, b, out=out)
+    result = flag_gems.bmm(a, b)
+    flag_gems.bmm_out(a, b, out=out)
     utils.gems_assert_close(result, expected, torch.bfloat16, reduce_dim=K)
     utils.gems_assert_close(out, expected, torch.bfloat16, reduce_dim=K)
 

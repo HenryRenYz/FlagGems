@@ -17,6 +17,7 @@
 import math
 import os
 
+import torch
 import triton
 import triton.language as tl
 
@@ -86,6 +87,11 @@ _PPU_ULTRA_WIDE_DIRECT_BLOCK_M = 64
 EXPAND_CONFIG_FILENAME = os.path.normpath(
     os.path.join(os.path.dirname(__file__), "..", "mm_ppu_expand.yaml")
 )
+
+
+def _output_overlaps_inputs(out, *inputs):
+    """Conservatively detect inputs that may be overwritten by an output."""
+    return any(torch._C._overlaps(out, inp) for inp in inputs)
 
 
 def _ppu_bucket_strategy(value):

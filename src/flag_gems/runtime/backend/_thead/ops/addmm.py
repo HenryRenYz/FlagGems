@@ -22,6 +22,7 @@ from flag_gems.ops.addmm import addmm as _generic_addmm
 from flag_gems.ops.addmm import addmm_out as _generic_addmm_out
 from flag_gems.utils import broadcastable_to
 
+from .gemm_utils import _output_overlaps_inputs
 from .mm import _can_use_ppu_mm, _dispatch_ppu_gemm
 
 logger = logging.getLogger(__name__)
@@ -58,6 +59,8 @@ def addmm(bias, mat1, mat2, *, beta=1, alpha=1):
 def addmm_out(bias, mat1, mat2, *, beta=1, alpha=1, out=None):
     logger.debug("GEMS_THEAD ADDMM_OUT")
     if out is not None and _can_use_ppu_addmm(bias, mat1, mat2, out):
+        if _output_overlaps_inputs(out, bias, mat1, mat2):
+            return out.copy_(addmm(bias, mat1, mat2, beta=beta, alpha=alpha))
         return _run_ppu_addmm_dispatch(bias, mat1, mat2, out, alpha, beta)
     return _generic_addmm_out(
         bias,

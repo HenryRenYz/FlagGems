@@ -39,6 +39,7 @@ from .gemm_utils import (
     HAS_PPU_TLE,
     _aiu_load_mask,
     _configs_from_specs,
+    _output_overlaps_inputs,
     _ppu_bucket_strategy,
     _ppu_gemm_tile,
     _ppu_reduction_bucket_strategy,
@@ -1770,6 +1771,8 @@ def bmm(A, B):
 def bmm_out(A, B, out):
     logger.debug("GEMS_THEAD BMM_OUT")
     if _can_use_ppu_bmm(A, B, out):
+        if _output_overlaps_inputs(out, A, B):
+            return out.copy_(bmm(A, B))
         return _dispatch_ppu_bmm(A, B, out)
     return _generic_bmm_out(A, B, out)
 

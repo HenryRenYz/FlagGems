@@ -50,6 +50,7 @@ from .gemm_utils import (
     _configs_from_specs,
     _is_deep_fixed_row,
     _is_low_output_parallelism,
+    _output_overlaps_inputs,
     _ppu_bucket_strategy,
     _ppu_gemm_tile,
     _ppu_reduction_bucket_strategy,
@@ -2500,6 +2501,8 @@ def mm(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
 
 def mm_out(a: torch.Tensor, b: torch.Tensor, *, out: torch.Tensor) -> torch.Tensor:
     logger.debug("GEMS_THEAD MM_OUT")
+    if _output_overlaps_inputs(out, a, b) and _can_use_ppu_mm(a, b, out):
+        return out.copy_(mm(a, b))
     routed = _dispatch_ppu_mm(a, b, out)
     if routed is not None:
         return routed

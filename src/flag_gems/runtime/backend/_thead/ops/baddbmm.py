@@ -20,10 +20,10 @@ import torch
 
 from flag_gems.ops.baddbmm import baddbmm as _generic_baddbmm
 from flag_gems.ops.baddbmm import baddbmm_out as _generic_baddbmm_out
-from flag_gems.ops.baddbmm_ import baddbmm_ as _generic_baddbmm_
 from flag_gems.utils import broadcastable_to
 
 from .bmm import _can_use_ppu_bmm, _can_use_ppu_bmm_inputs, _dispatch_ppu_bmm
+from .gemm_utils import _output_overlaps_inputs
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +58,8 @@ def baddbmm(bias, A, B, beta=1.0, alpha=1.0):
 def baddbmm_out(bias, A, B, *, beta=1.0, alpha=1.0, out):
     logger.debug("GEMS_THEAD BADDBMM_OUT")
     if _can_use_ppu_baddbmm(bias, A, B, out):
+        if _output_overlaps_inputs(out, bias, A, B):
+            return out.copy_(baddbmm(bias, A, B, beta=beta, alpha=alpha))
         return _dispatch_ppu_bmm(
             A,
             B,
@@ -69,19 +71,4 @@ def baddbmm_out(bias, A, B, *, beta=1.0, alpha=1.0, out):
     return _generic_baddbmm_out(bias, A, B, beta=beta, alpha=alpha, out=out)
 
 
-def baddbmm_(self, A, B, *, beta=1.0, alpha=1.0):
-    """Fuse the in-place bias read and output write when shapes match."""
-    logger.debug("GEMS_THEAD BADDBMM_")
-    if (
-        self.ndim == 3
-        and A.ndim == B.ndim == 3
-        and self.shape == (A.shape[0], A.shape[1], B.shape[2])
-        and self.is_contiguous()
-        and not self.requires_grad
-        and _can_use_ppu_baddbmm(self, A, B, self)
-    ):
-        return _dispatch_ppu_bmm(A, B, self, bias=self, alpha=alpha, beta=beta)
-    return _generic_baddbmm_(self, A, B, beta=beta, alpha=alpha)
-
-
-__all__ = ["baddbmm", "baddbmm_out", "baddbmm_"]
+__all__ = ["baddbmm", "baddbmm_out"]

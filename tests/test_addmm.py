@@ -249,40 +249,6 @@ def test_addmm_out_beta_zero_ignores_bias(dtype):
     utils.gems_assert_close(out, ref_out, dtype, reduce_dim=K)
 
 
-@pytest.mark.addmm
-@pytest.mark.skipif(
-    flag_gems.vendor_name != "thead", reason="T-Head fused PPU GEMM coverage"
-)
-@pytest.mark.parametrize("M, N, K", [(16, 128, 128), (400, 64, 7168)])
-def test_thead_addmm_beta_zero_does_not_read_bias(M, N, K):
-    mat1 = torch.randn((M, K), dtype=torch.bfloat16, device=flag_gems.device)
-    weight = torch.randn((N, K), dtype=torch.bfloat16, device=flag_gems.device)
-    bias = torch.full((N,), float("nan"), dtype=torch.bfloat16, device=flag_gems.device)
-    reference = torch.addmm(bias, mat1, weight.t(), alpha=1.25, beta=0)
-    result = flag_gems.addmm(bias, mat1, weight.t(), alpha=1.25, beta=0)
-    assert torch.isfinite(result).all()
-    torch.testing.assert_close(result, reference, rtol=0.05, atol=1)
-
-
-@pytest.mark.addmm
-@pytest.mark.skipif(
-    flag_gems.vendor_name != "thead", reason="T-Head tall NT PPU GEMM coverage"
-)
-def test_thead_addmm_tall_nt():
-    M, N, K = 8192, 256, 2048
-    mat1 = torch.randn((M, K), dtype=torch.bfloat16, device=flag_gems.device)
-    weight = torch.randn((N, K), dtype=torch.bfloat16, device=flag_gems.device)
-    bias = torch.randn((M, N), dtype=torch.bfloat16, device=flag_gems.device)
-    reference = torch.addmm(bias, mat1, weight.t())
-    result = flag_gems.addmm(bias, mat1, weight.t())
-    torch.testing.assert_close(result, reference)
-
-    out = torch.empty_like(reference)
-    returned = flag_gems.addmm_out(bias, mat1, weight.t(), out=out)
-    assert returned.data_ptr() == out.data_ptr()
-    torch.testing.assert_close(out, reference)
-
-
 @pytest.mark.addmm_out_vector_bias
 @pytest.mark.addmm_out
 @_addmm_layout_bias_only

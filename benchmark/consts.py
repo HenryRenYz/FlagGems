@@ -25,6 +25,8 @@ import flag_gems
 from .cases import BenchmarkCaseList, BenchmarkCasePlan, BenchmarkCaseSpec  # noqa: F401
 
 FLOAT_DTYPES = [torch.float16, torch.float32, torch.bfloat16]
+# Only THead GEMM validation is restricted to the optimized BF16 path.
+GEMM_DTYPES = [torch.bfloat16] if flag_gems.vendor_name == "thead" else FLOAT_DTYPES
 INT_DTYPES = [torch.int16, torch.int32]
 BOOL_DTYPES = [torch.bool]
 COMPLEX_DTYPES = [torch.complex64]

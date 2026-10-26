@@ -34,6 +34,10 @@ else:
     ]
     FLOAT_DTYPES = ORIG_FLOAT_DTYPES
 
+# THead GEMM delivery coverage is BF16, including quick-mode runs.
+if flag_gems.vendor_name == "thead":
+    FLOAT_DTYPES = [torch.bfloat16]
+
 GNK_SHAPES = [(16, 512, 2048), (16, 2560, 2048), (64, 2048, 128)]
 
 

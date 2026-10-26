@@ -33,6 +33,10 @@ else:
     ]
     FLOAT_DTYPES = utils.FLOAT_DTYPES
 
+# THead GEMM delivery coverage is BF16, including quick-mode runs.
+if flag_gems.vendor_name == "thead":
+    FLOAT_DTYPES = [torch.bfloat16]
+
 
 @pytest.mark.mv
 @pytest.mark.parametrize("M, N", MN_SHAPES)

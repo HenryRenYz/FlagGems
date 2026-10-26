@@ -115,6 +115,6 @@ def test_mv():
         op_name="mv",
         input_fn=_input_fn,
         torch_op=torch.Tensor.mv,
-        dtypes=consts.FLOAT_DTYPES,
+        dtypes=consts.GEMM_DTYPES,
     )
     bench.run()

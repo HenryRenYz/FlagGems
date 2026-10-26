@@ -32,7 +32,7 @@ import yaml
 import flag_gems
 
 from . import consts
-from .base import Benchmark, GenericBenchmark2DOnly
+from .base import Benchmark, GenericBenchmark2DOnly, deduplicate_thead_gemm_shapes
 from .conftest import Config, emit_record_logger
 from .consts import (
     COMPLEX_DTYPES,
@@ -115,6 +115,10 @@ class BlasBenchmark(Benchmark):
     def __init__(self, *args, input_fn, **kwargs):
         super().__init__(*args, **kwargs)
         self.input_fn = input_fn
+
+    def set_shapes(self, shape_file_path=None):
+        super().set_shapes(shape_file_path)
+        self.shapes = deduplicate_thead_gemm_shapes(self.op_name, self.shapes)
 
     def get_input_iter(self, cur_dtype) -> Generator:
         if self.op_name == "mm" and Config.mm_layout is not None:
@@ -348,19 +352,25 @@ def bmm_input_fn(b, m, n, k, cur_dtype, device, b_column_major):
 
 
 def baddbmm_input_fn(b, m, n, k, cur_dtype, device, b_column_major):
-    inp1 = torch.randn([b, m, k], dtype=cur_dtype, device=device, requires_grad=True)
+    # THead delivery measures forward inference; backward has separate accuracy tests.
+    requires_grad = flag_gems.vendor_name != "thead"
+    inp1 = torch.randn(
+        [b, m, k], dtype=cur_dtype, device=device, requires_grad=requires_grad
+    )
 
     if b_column_major:
         inp2 = torch.randn(
-            [b, n, k], dtype=cur_dtype, device=device, requires_grad=True
+            [b, n, k], dtype=cur_dtype, device=device, requires_grad=requires_grad
         )
         inp2 = inp2.transpose(1, 2).contiguous()
     else:
         inp2 = torch.randn(
-            [b, k, n], dtype=cur_dtype, device=device, requires_grad=True
+            [b, k, n], dtype=cur_dtype, device=device, requires_grad=requires_grad
         )
 
-    bias = torch.randn([b, m, n], dtype=cur_dtype, device=device, requires_grad=True)
+    bias = torch.randn(
+        [b, m, n], dtype=cur_dtype, device=device, requires_grad=requires_grad
+    )
 
     yield bias, inp1, inp2
 
@@ -1057,9 +1067,11 @@ class ParallelBenchmarkMixin:
             else:
                 metrics = self._run_inputs(self.get_input_iter(dtype), dtype=dtype)
 
-            if self.RECORD_PARALLEL_RESULTS and not os.environ.get(
-                PARALLEL_RESULT_FILE_ENV
-            ):
+            record_results = self.RECORD_PARALLEL_RESULTS or (
+                flag_gems.vendor_name == "thead"
+                and self.op_name in ("mm", "mv", "addmm", "bmm", "baddbmm")
+            )
+            if record_results and not os.environ.get(PARALLEL_RESULT_FILE_ENV):
                 # Main process of an opted-in benchmark: record the merged
                 # metrics like a single-process benchmark (--record json).
                 self._emit_result(dtype, metrics)
@@ -1608,7 +1620,7 @@ def test_blas_benchmark(op_name, torch_op, input_fn, bench_cls):
         input_fn=input_fn,
         op_name=op_name,
         torch_op=torch_op,
-        dtypes=FLOAT_DTYPES,
+        dtypes=consts.GEMM_DTYPES,
     )
     bench.run()
 
@@ -1731,7 +1743,7 @@ def test_mv_and_outer_benchmark(op_name, torch_op, input_fn):
         input_fn=input_fn,
         op_name=op_name,
         torch_op=torch_op,
-        dtypes=FLOAT_DTYPES,
+        dtypes=consts.GEMM_DTYPES if op_name == "mv" else FLOAT_DTYPES,
     )
     bench.run()
 

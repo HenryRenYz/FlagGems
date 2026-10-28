@@ -1,13 +1,13 @@
-"""Run real published-model selection and kernel correctness in a fresh process.
+"""Check real model selection, kernel correctness and AUTO fallback.
 
-Use a private model/kernel cache and an idle device. For example::
+Run on an idle device with explicit opt-in; select operators with pytest -k::
 
-    CUDA_VISIBLE_DEVICES=0 python tools/flagtune_published_regression.py --operators mul mm
+    FLAGTUNE_RUN_PUBLISHED_REGRESSION=1 CUDA_VISIBLE_DEVICES=0 \\
+      python -m pytest tests/flagtune/test_published_regression.py -v -k mul
 
-Repeat with ``--scenario unavailable`` to exercise AUTO fallback without
-replacing the predictor or model validator. The normal scenario requires real
-Cost Model proposals, so a silent fallback or an ordinary kernel cache hit
-cannot count as a successful regression.
+Each case runs in a fresh subprocess with private model, Triton and FlagGems
+caches. The published scenario requires real Cost Model proposals; the other
+scenarios require AUTO fallback. Both paths verify numerical correctness.
 """
 
 import argparse
@@ -15,8 +15,56 @@ import importlib
 import io
 import json
 import os
+import subprocess
+import sys
 import tarfile
 from pathlib import Path
+
+import pytest
+
+
+@pytest.mark.skipif(
+    os.environ.get("FLAGTUNE_RUN_PUBLISHED_REGRESSION") != "1",
+    reason="set FLAGTUNE_RUN_PUBLISHED_REGRESSION=1 on an idle device",
+)
+@pytest.mark.parametrize(
+    "scenario", ["published", "unavailable", "incompatible", "missing-variant"]
+)
+@pytest.mark.parametrize("operator", ["mul", "mm", "mv"])
+def test_published_regression(tmp_path, scenario, operator):
+    root = Path(__file__).resolve().parents[2]
+    output = tmp_path / "report.json"
+    environment = os.environ.copy()
+    environment.update(
+        FLAGTUNE_MODEL_CACHE=str(tmp_path / "models"),
+        TRITON_CACHE_DIR=str(tmp_path / "triton"),
+        FLAGGEMS_CACHE_DIR=str(tmp_path / "flaggems"),
+        PYTHONPATH=os.pathsep.join(
+            path for path in (str(root / "src"), environment.get("PYTHONPATH")) if path
+        ),
+    )
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(Path(__file__).resolve()),
+            "--operators",
+            operator,
+            "--scenario",
+            scenario,
+            "--output",
+            str(output),
+        ],
+        cwd=root,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=600,
+    )
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+    report = json.loads(output.read_text())
+    assert report["scenario"] == scenario
+    assert report["checks"]
+    assert all(check["correct"] for check in report["checks"])
 
 
 def main():

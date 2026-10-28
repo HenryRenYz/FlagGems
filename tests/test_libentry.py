@@ -807,8 +807,9 @@ def test_libentry_key_normalizes_descriptor_arguments(descriptor_module):
 
 
 @pytest.mark.parametrize("keyword_first", [False, True])
+@pytest.mark.parametrize("cache_binding", [False, True])
 def test_libentry_run_normalizes_keyword_descriptors(
-    monkeypatch, descriptor_module, keyword_first
+    monkeypatch, descriptor_module, keyword_first, cache_binding
 ):
     """Both calling styles share a cache key and pass real descriptors on launch."""
 
@@ -816,7 +817,7 @@ def test_libentry_run_normalizes_keyword_descriptors(
     def kernel(a_desc):
         pass
 
-    entry = libentry_mod.LibEntry(kernel)
+    entry = libentry_mod.LibEntry(kernel, cache_binding=cache_binding)
     entry._has_flagtune_tuner = True
     monkeypatch.setattr(entry, "_apply_flagtune", lambda device=None: None)
     monkeypatch.setattr(libentry_mod.torch_device_fn, "current_device", lambda: "cpu")

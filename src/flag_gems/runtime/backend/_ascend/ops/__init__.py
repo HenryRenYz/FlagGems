@@ -159,10 +159,14 @@ from .masked_scatter import masked_scatter, masked_scatter_
 from .masked_scatter_backward import masked_scatter_backward
 from .masked_select import masked_select
 from .matmul_bf16 import matmul_bf16
+from .matmul_bias_activation import matmul_bias_activation
 from .matmul_int8 import matmul_int8
 from .max import max, max_dim
 from .mean import mean, mean_dim
 from .min import min, min_dim
+from .mish import mish
+from .mish_ import mish_
+from .mish_backward import mish_backward
 from .mixed_dtypes_linear import mixed_dtypes_linear
 from .mm import mm, mm_out
 from .mm_w8a8_int8 import mm_w8a8_int8, mm_w8a8_int8_out
@@ -172,10 +176,13 @@ from .multinomial import multinomial
 from .nanmedian import nanmedian, nanmedian_dim, nanmedian_dim_values, nanmedian_out
 from .nansum import nansum, nansum_out
 from .narrow_copy import narrow_copy
+from .ne_ import ne_
+from .negative import negative
 from .nested_view_from_jagged_copy import nested_view_from_jagged_copy
 from .new_ones import new_ones
 from .nonzero_static import nonzero_static, nonzero_static_out
 from .norm_scalaropt_dim import norm_scalaropt_dim
+from .not_equal import not_equal
 from .ones import ones
 from .ones_like import ones_like
 from .outer import outer
@@ -193,6 +200,8 @@ from .pow import (
 )
 from .randperm import randperm
 from .relu6_ import relu6_
+from .renorm import renorm
+from .renorm_ import renorm_
 from .repeat_interleave import repeat_interleave_self_int
 from .replication_pad2d_backward import (
     replication_pad2d_backward,
@@ -211,11 +220,20 @@ from .segment_reduce import _segment_reduce_backward, _segment_reduce_backward_o
 from .select_backward import select_backward
 from .select_scatter import select_scatter
 from .silu import silu, silu_
+from .silu_backward import silu_backward
 from .slice_scatter import slice_scatter
+from .smm import smm
 from .softmax import softmax, softmax_backward, softmax_backward_out, softmax_out
+from .softplus_backward import softplus_backward
+from .softshrink_backward import softshrink_backward
 from .sort import sort
 from .sparse_sampled_addmm import sparse_sampled_addmm, sparse_sampled_addmm_out
+from .special_erfc import special_erfc
 from .special_erfinv import special_erfinv
+from .special_log1p_out import special_log1p_out
+from .special_logit_out import special_logit_out
+from .special_xlogy import special_xlogy
+from .square_ import square_
 from .squeeze_copy import squeeze_copy
 from .stack import stack
 from .subtract import subtract
@@ -240,6 +258,7 @@ from .upsample_nearest_exact3d_backward_grad_input import (
     upsample_nearest_exact3d_backward_grad_input,
 )
 from .upsample_nearest2d import upsample_nearest2d
+from .upsample_nearest3d_backward import upsample_nearest3d_backward
 from .upsample_nearest3d_backward_grad_input import (
     upsample_nearest3d_backward_grad_input,
 )
@@ -248,7 +267,9 @@ from .vector_norm import vector_norm
 from .view_copy import view_copy
 from .vstack import vstack
 from .where import where_scalar_other, where_scalar_self, where_self, where_self_out
+from .xlogy import xlogy
 from .xlogy_ import xlogy_
+from .xlogy_out import xlogy_out
 from .xlogy_tensor_scalar import xlogy_tensor_scalar
 from .xlogy_tensor_scalar_out import xlogy_tensor_scalar_out
 from .zero import zero
@@ -434,6 +455,7 @@ __all__ = [
     "masked_scatter_backward",
     "masked_select",
     "matmul_bf16",
+    "matmul_bias_activation",
     "matmul_int8",
     "max",
     "max_dim",
@@ -444,6 +466,9 @@ __all__ = [
     "mha_varlan_fwd_opt",
     "min",
     "min_dim",
+    "mish",
+    "mish_",
+    "mish_backward",
     "mixed_dtypes_linear",
     "mm",
     "mm_out",
@@ -460,12 +485,15 @@ __all__ = [
     "nansum_out",
     "narrow_copy",
     "native_layer_norm",
+    "ne_",
+    "negative",
     "nested_view_from_jagged_copy",
     "new_ones",
     "nonzero_static",
     "nonzero_static_out",
     "norm_scalaropt_dim",
     "normed_cumsum",
+    "not_equal",
     "ones",
     "ones_like",
     "outer",
@@ -481,6 +509,8 @@ __all__ = [
     "pow_tensor_tensor_",
     "randperm",
     "relu6_",
+    "renorm",
+    "renorm_",
     "repeat_interleave_self_int",
     "replication_pad2d_backward",
     "replication_pad2d_backward_grad_input",
@@ -506,15 +536,24 @@ __all__ = [
     "select_scatter",
     "silu",
     "silu_",
+    "silu_backward",
     "slice_scatter",
+    "smm",
     "softmax",
     "softmax_backward",
     "softmax_backward_out",
     "softmax_out",
+    "softplus_backward",
+    "softshrink_backward",
     "sort",
     "sparse_sampled_addmm",
     "sparse_sampled_addmm_out",
+    "special_erfc",
     "special_erfinv",
+    "special_log1p_out",
+    "special_logit_out",
+    "special_xlogy",
+    "square_",
     "squeeze_copy",
     "stack",
     "subtract",
@@ -537,6 +576,7 @@ __all__ = [
     "upsample_linear1d_backward",
     "upsample_nearest_exact3d_backward_grad_input",
     "upsample_nearest2d",
+    "upsample_nearest3d_backward",
     "upsample_nearest3d_backward_grad_input",
     "var_mean",
     "vector_norm",
@@ -546,7 +586,9 @@ __all__ = [
     "where_scalar_self",
     "where_self",
     "where_self_out",
+    "xlogy",
     "xlogy_",
+    "xlogy_out",
     "xlogy_tensor_scalar",
     "xlogy_tensor_scalar_out",
     "zero",

@@ -1,0 +1,39 @@
+{
+  "platform_key": "thead-zw810e",
+  "version": "1.2.0",
+  "status": "ready_for_publication",
+  "package_filename": "thead-zw810e_v1.2.0.tar.gz",
+  "transport_filename": "flagtune-xgb-thead-zw810e_v1.2.0.tar.gz",
+  "sha256": "a2764fb4319d82ce4b2654d18321cb0ef8b3d30661f69c277104eaca32ac03d7",
+  "models": 37,
+  "retrained_gemm_models": 35,
+  "retained_mul_models": 2,
+  "dtype": "bfloat16",
+  "layouts": [
+    "NN",
+    "NT"
+  ],
+  "batched_sizes": [
+    2,
+    4,
+    8
+  ],
+  "training": {
+    "source_shapes": 2372,
+    "train_shapes": 1186,
+    "heldout_shapes": 1186,
+    "seed": 2026,
+    "split_unit": "original shape, shared by layouts, batch sizes and operators",
+    "shape_config_sha256": "e2768ccf8541287cfa3fd5b9c254e68871421e5feacaab9935cf960870138302"
+  },
+  "renumbered_from": {
+    "version": "1.3.0",
+    "sha256": "a32a4654703c05af29e5bc52b96ca915da58507a0d2387247d8e0f93fa29cb2f",
+    "model_data_unchanged": true
+  },
+  "withdrawn_draft": {
+    "version": "1.2.0",
+    "sha256": "cdb26e9056b407207383551f0d95307989888bfaffa037385c16bdbf0645e29a"
+  },
+  "performance_csv": "20261103 addmm-router_gemm-bmm-baddbmm-tuning-speedup.csv"
+}

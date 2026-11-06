@@ -26,6 +26,7 @@ import threading
 import time
 from abc import abstractmethod
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from enum import Enum
 from functools import cached_property
@@ -401,6 +402,12 @@ class LibTuner(triton.runtime.Autotuner):
             unadapted, preserving its Default/Expanded routes.
         """
         benchmark_retries = DEFAULT_BENCHMARK_RETRIES
+        # Keep the declared durations even when Triton wraps graph timing in
+        # a do_bench closure (whose generic protocol is marked custom).
+        self._flagtune_benchmark_defaults = (
+            25 if warmup is None else warmup,
+            100 if rep is None else rep,
+        )
         if do_bench is None and major_version >= 3 and minor_version >= 2:
             if use_cuda_graph:
                 from triton.testing import do_bench_cudagraph
@@ -968,6 +975,42 @@ class LibTuner(triton.runtime.Autotuner):
         finally:
             self.nargs = original_nargs
 
+    def _precompile_configs(
+        self,
+        configs: List[triton.Config],
+        args: Tuple[Any, ...],
+        meta: Dict[str, Any],
+        cache: BenchmarkCache,
+        workers: int,
+    ) -> None:
+        """Compile cache misses concurrently before serial device timing.
+
+        Triton's async compiler submits CPU compilation from the calling
+        thread and finalizes its JIT cache only after all futures finish.  No
+        kernel is launched here, so candidate measurements still run in the
+        original order on one device. Failed compiles are retried through the
+        normal benchmark path, which preserves its error handling.
+        """
+        async_compile = getattr(triton, "AsyncCompileMode", None)
+        if async_compile is None:
+            return
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            with async_compile(pool, ignore_errors=True):
+                for config in configs:
+                    if cache.get(config) is not None:
+                        continue
+                    current = {**meta, **config.all_kwargs(), "warmup": True}
+                    full_nargs = {**self.nargs, **current}
+                    try:
+                        if config.pre_hook is not None:
+                            config.pre_hook(full_nargs)
+                        self.pre_hook(full_nargs)
+                        self.fn.run(*args, **current)
+                    except Exception:
+                        # Let _bench report the same error it would without
+                        # the optional precompile pass.
+                        continue
+
     def run(self, *args, **kwargs):
         """Select and launch a config under the current scoped run mode.
 
@@ -982,6 +1025,9 @@ class LibTuner(triton.runtime.Autotuner):
         counters reset for every invocation. BenchmarkCache v2 uses the exact
         raw autotune key plus tensor dtypes and the scoped warmup/repetition
         protocol; ConfigCache continues to use the strategy-normalized key.
+        On PPU, FLAGGEMS_PRECOMPILE_WORKERS > 1 compiles missing candidates
+        concurrently before serial timing. Cost Model selection never eagerly
+        precompiles the entire Expanded domain.
         """
         self.benchmark_success_count = 0
         self.benchmark_cache_hit_count = 0
@@ -1033,6 +1079,16 @@ class LibTuner(triton.runtime.Autotuner):
                     else self.prune_configs(kwargs)
                 )
                 bench_start = time.time()
+                precompile_workers = int(os.getenv("FLAGGEMS_PRECOMPILE_WORKERS", "0"))
+                if (
+                    device.vendor_name == "thead"
+                    and precompile_workers > 1
+                    and (exhaustive_collection or not cost_model_mode)
+                ):
+                    pruned_configs = list(pruned_configs)
+                    self._precompile_configs(
+                        pruned_configs, args, kwargs, cache, precompile_workers
+                    )
 
                 def bench(config: triton.Config) -> List[float]:
                     ret = cache.get(config)

@@ -208,7 +208,13 @@ def identity_cache_key(
         if hasattr(value, "dtype") and hasattr(value, "device"):
             tensors.append(value)
     platform = f"{vendor_name}:" + ",".join(str(tensor.device) for tensor in tensors)
-    dtype_key = ",".join(str(tensor.dtype) for tensor in tensors)
+    dtype_resolver = getattr(tuner, "_flagtune_dtype_resolver", None)
+    dtypes = (
+        dtype_resolver(arguments)
+        if dtype_resolver is not None
+        else (tensor.dtype for tensor in tensors)
+    )
+    dtype_key = ",".join(str(dtype) for dtype in dtypes)
     return platform, op_id, variant, dtype_key
 
 
@@ -415,19 +421,20 @@ def run_policy(
         return default_policy(self, bench_fn, configs, args, kwargs)
     intent_required = intent is runtime.CostModelIntent.REQUIRED
     arguments = {**(self.nargs or {}), **kwargs}
-    identity_key = identity_cache_key(self, arguments, runtime.device.vendor_name)
 
+    identity_key = (runtime.device.vendor_name, op_id, variant, "unresolved")
     phase = "preload"
     try:
         with cost_model_boundary(phase):
             candidates = runtime_candidates(self, op_name, kwargs)
             # A single legal runtime candidate needs neither identity discovery
             # nor a model. Its ordinary benchmark failure is not a CM failure.
-            loaded = (
-                load_model(self, identity_key, arguments, infer_tensor_dtypes)
-                if len(candidates) > 1
-                else None
-            )
+            loaded = None
+            if len(candidates) > 1:
+                identity_key = identity_cache_key(
+                    self, arguments, runtime.device.vendor_name
+                )
+                loaded = load_model(self, identity_key, arguments, infer_tensor_dtypes)
         if loaded is not None:
             phase = "postload"
             previous_strict = getattr(self, "_flagtune_strict_benchmark", False)

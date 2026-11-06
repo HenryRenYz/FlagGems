@@ -49,7 +49,6 @@ from .gemm_utils import (
     HAS_PPU_TLE,
     _aiu_load_mask,
     _configs_from_specs,
-    _is_deep_fixed_row,
     _is_low_output_parallelism,
     _output_overlaps_inputs,
     _ppu_bucket_strategy,
@@ -95,6 +94,7 @@ def _full_k_tiles(args):
 
 def _full_m_tiles(args):
     """Whether the selected row tile divides the logical M extent."""
+    # Use the selected tile, not a shape-family alignment hint.
     # The small-M kernel fixes its physical row tile at 16 and therefore has
     # no BLOCK_M autotune argument. Other families provide the selected tile.
     return int(args["M"]) % int(args.get("BLOCK_M", _SMALL_M_TILE)) == 0
@@ -132,15 +132,13 @@ def _b_transposed_layout(b: torch.Tensor) -> bool:
 
 
 def _is_supported_ppu_b_layout(a: torch.Tensor, b: torch.Tensor) -> bool:
-    """Return whether B has a PPU-validated NN or NT storage layout.
+    """Accept dense NN and NT layouts, including partial reduction tiles.
 
-    The transpose-stride path is compiler-correct for native 128-wide PPU K
-    tiles.  Keep other reduction tails on the generic stride-aware kernel.
-    Every shape in the target MM trace satisfies this alignment.
+    Per-operand alignment controls AIU candidate legality through
+    ``_aiu_load_mask``. The kernels handle M/N/K tails with tile-dependent
+    masks or descriptor boundary checks; K alignment is not a layout gate.
     """
-    return b.is_contiguous() or (
-        _is_transposed_contiguous_2d(b) and a.shape[1] % 128 == 0
-    )
+    return b.is_contiguous() or _is_transposed_contiguous_2d(b)
 
 
 def _ppu_mm_configs():
@@ -663,7 +661,15 @@ def _flagtune_mm_dtype_identity(arguments):
         rhs = arguments.get("X")
     if lhs is None or rhs is None:
         raise ValueError("PPU MM FlagTune identity requires A and B/X tensors")
-    return lhs.dtype, rhs.dtype, lhs.dtype
+    output = arguments.get("C")
+    if output is None:
+        output = arguments.get("Y")
+    # Split-K partials share the original MM model identity; Workspace is an
+    # implementation detail and is identical for fused/unfused epilogues.
+    output_dtype = lhs.dtype if output is None else output.dtype
+    if arguments.get("FUSE_ADDMM", arguments.get("FUSE_BIAS", False)):
+        return lhs.dtype, rhs.dtype, arguments["Bias"].dtype, output_dtype
+    return lhs.dtype, rhs.dtype, output_dtype
 
 
 if HAS_PPU_TLE:
@@ -1969,8 +1975,7 @@ def _run_ppu_mm(
             ALIGNED_A_512X128=(allow_aligned_a and M % 512 == 0 and K % 128 == 0),
             ALIGNED_B_128X128=width % 128 == 0 and K % 128 == 0,
             EVEN_K=K % 128 == 0,
-            EVEN_M=M % 512 == 0
-            or (not fuse_addmm and _is_deep_fixed_row(M, width, K) and M % 32 == 0),
+            EVEN_M=M % 512 == 0,
             EVEN_N=width % 1024 == 0,
             FUSE_ADDMM=fuse_addmm,
             READ_BIAS=fuse_addmm and beta != 0,

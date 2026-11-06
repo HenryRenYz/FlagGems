@@ -114,6 +114,28 @@ def test_unbound_failure_lookup_does_not_resolve_tensor_dtypes(models, monkeypat
     assert models.attempts == []
 
 
+def test_missing_fused_model_keeps_unfused_model_enabled(models):
+    current = models.tuner()
+    current.arg_names.append("Bias")
+    current.nargs["Bias"] = current.nargs["C"]
+    current.nargs["FUSE_ADDMM"] = True
+    current._flagtune_dtype_resolver = lambda arguments: tuple(
+        arguments[name].dtype
+        for name in (
+            ("A", "B", "Bias", "C") if arguments["FUSE_ADDMM"] else ("A", "B", "C")
+        )
+    )
+    fused = ("thead-zw810e", "flaggems/mm", "gemv_ppu", "bf16-bf16-bf16-bf16")
+    unfused = (*fused[:3], "bf16-bf16-bf16")
+    models.broken.add(fused)
+
+    assert models.run(current) is models.configs[0]
+    current.nargs["FUSE_ADDMM"] = False
+    assert models.run(current) is models.configs[1]
+    assert models.attempts == [fused, unfused]
+    assert cm._COST_MODEL_DISABLED_OPS == {fused}
+
+
 def test_failure_isolates_platform_dtype_and_recovery(models, caplog, monkeypatch):
     key = ("thead-zw810e", "flaggems/mm", "gemv_ppu", "bf16-bf16-bf16")
     other = ("nvidia-h20", *key[1:])

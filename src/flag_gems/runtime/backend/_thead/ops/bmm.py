@@ -267,7 +267,7 @@ def _ppu_batched_gemv_configs():
 
 if HAS_PPU_TLE:
 
-    @libentry(ppu_cached=True)
+    @libentry(cache_binding=True)
     @libtuner(
         configs=_ppu_batched_gemv_configs(),
         key=[
@@ -391,7 +391,7 @@ if HAS_PPU_TLE:
             result += beta * tl.load(bias_ptrs, mask=mask, other=0.0)
         tl.store(c_ptrs, result.to(C.dtype.element_ty), mask=mask)
 
-    @libentry(ppu_cached=True)
+    @libentry(cache_binding=True)
     @libtuner(
         configs=_ppu_multi_row_bmm_configs(),
         key=["FUSE_BIAS", "READ_BIAS", "B_TRANSPOSED", "batch", "M", "N", "K"],
@@ -480,7 +480,7 @@ if HAS_PPU_TLE:
             mask=mask,
         )
 
-    @libentry(ppu_cached=True)
+    @libentry(cache_binding=True)
     @libtuner(
         configs=_ppu_narrow_columns_bmm_configs(),
         key=["FUSE_BIAS", "READ_BIAS", "B_TRANSPOSED", "batch", "M", "N", "K"],
@@ -569,7 +569,7 @@ if HAS_PPU_TLE:
             mask=row_mask & (pid_n < N),
         )
 
-    @libentry(ppu_cached=True)
+    @libentry(cache_binding=True)
     @libtuner(
         configs=_ppu_bmm_configs(),
         key=[
@@ -717,7 +717,7 @@ if HAS_PPU_TLE:
             READ_BIAS,
         )
 
-    @libentry(ppu_cached=True)
+    @libentry(cache_binding=True)
     @libtuner(
         configs=_ppu_bmm_narrow_n_configs(),
         key=[
@@ -865,7 +865,7 @@ if HAS_PPU_TLE:
             READ_BIAS,
         )
 
-    @libentry(ppu_cached=True)
+    @libentry(cache_binding=True)
     @libtuner(
         configs=_ppu_small_m_bmm_configs(),
         key=[
@@ -1005,7 +1005,7 @@ if HAS_PPU_TLE:
             READ_BIAS,
         )
 
-    @libentry(ppu_cached=True)
+    @libentry(cache_binding=True)
     @libtuner(
         configs=_ppu_split_k_bmm_configs(),
         key=["B_TRANSPOSED", "aiu_load_mask", "batch", "M", "N", "K"],
@@ -1151,7 +1151,7 @@ if HAS_PPU_TLE:
         else:
             tl.store(workspace_ptrs, acc, mask=mask)
 
-    @libentry(ppu_cached=True)
+    @libentry(cache_binding=True)
     @libtuner(
         configs=_ppu_split_k_bmm_reduce_configs(),
         key=["FUSE_BIAS", "READ_BIAS", "M", "N", "total_elements", "SPLIT_K"],

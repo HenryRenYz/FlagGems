@@ -27,7 +27,7 @@ def entry_with(apply):
     entry.fn = SimpleNamespace(apply_flagtune=apply, fn=None)
     entry.lock = threading.Lock()
     entry._flagtune_state = None
-    entry._flagtune_model_ids = ()
+    entry._flagtune_tuners = ()
     entry.kernel_cache = ({"old": 1}, {"old": 1})
     entry._cpu_cache = {"old": 1}
     return entry
@@ -44,6 +44,37 @@ def test_stable_state_skips_mode_resolution_and_device_changes_recheck():
     entry._apply_flagtune("cpu")
     assert len(calls) == 3
     assert entry.kernel_cache[0] == {"old": 1}
+
+
+@pytest.mark.parametrize("observe_cooldown", [False, True])
+def test_expired_auto_failure_invalidates_dispatch_even_after_idle(
+    monkeypatch, observe_cooldown
+):
+    key = ("nvidia-h20", "flaggems/mm", "general_tma", "bf16-bf16-bf16")
+    monkeypatch.setattr(lib.cost_model, "failure_key", lambda tuner, arguments: tuner)
+    now = [0.0]
+    monkeypatch.setattr(lib.cost_model.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(lib.cost_model, "_COST_MODEL_DISABLED_OPS", set())
+    monkeypatch.setattr(lib.cost_model, "_COST_MODEL_RETRY_AFTER", {})
+    states = []
+    entry = entry_with(
+        lambda: states.append(lib.cost_model.auto_failure_state(*key)) or True
+    )
+    entry._flagtune_tuners = (key,)
+    entry._apply_flagtune(0)
+    lib.cost_model._COST_MODEL_DISABLED_OPS.add(key)
+    lib.cost_model._COST_MODEL_RETRY_AFTER[key] = 60.0
+    if observe_cooldown:
+        entry._apply_flagtune(0)
+        assert states[-1] == (True, True)
+    entry.kernel_cache[0]["fallback"] = 1
+    now[0] = 60.0
+    entry._apply_flagtune(0)
+    assert states[-1] == (True, False)
+    assert not entry.kernel_cache[0]
+    count = len(states)
+    entry._apply_flagtune(0)
+    assert len(states) == count
 
 
 @pytest.mark.parametrize(
@@ -171,8 +202,10 @@ def test_model_source_is_not_a_mode_selection_dependency(monkeypatch):
 
 
 def test_auto_fuse_invalidates_all_entries_for_the_same_model(monkeypatch):
-    key = ("flaggems/mm", "gemv_ppu")
+    key = ("thead-zw810e", "flaggems/mm", "gemv_ppu", "bf16-bf16-bf16")
+    monkeypatch.setattr(lib.cost_model, "failure_key", lambda tuner, arguments: tuner)
     disabled = set()
+    monkeypatch.setattr(lib.cost_model, "_COST_MODEL_DISABLED_OPS", disabled)
     monkeypatch.setattr(
         lib.cost_model, "is_auto_disabled", lambda *identity: identity in disabled
     )
@@ -181,11 +214,11 @@ def test_auto_fuse_invalidates_all_entries_for_the_same_model(monkeypatch):
     first = entry_with(lambda: calls.append("first") or True)
     second = entry_with(lambda: calls.append("second") or True)
     for entry in (first, second):
-        entry._flagtune_model_ids = (key,)
+        entry._flagtune_tuners = (key,)
         entry._apply_flagtune(0)
         entry._apply_flagtune(0)
     assert calls == ["first", "second"]
-    disabled.add(("flaggems/mm", "unrelated"))
+    disabled.add((key[0], key[1], "unrelated", key[3]))
     first._apply_flagtune(0)
     assert len(calls) == 2
     disabled.add(key)

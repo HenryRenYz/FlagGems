@@ -674,7 +674,7 @@ def _flagtune_mm_dtype_identity(arguments):
 
 if HAS_PPU_TLE:
 
-    @libentry(ppu_cached=True)
+    @libentry(cache_binding=True)
     @libtuner(
         configs=_ppu_gemv_configs(),
         key=["FUSE_ADDMM", "READ_BIAS", "TRANSPOSED", "B_TRANSPOSED", "M", "K"],
@@ -754,7 +754,7 @@ if HAS_PPU_TLE:
             mask=rows < M,
         )
 
-    @libentry(ppu_cached=True)
+    @libentry(cache_binding=True)
     @libtuner(
         configs=_ppu_multi_row_gemv_configs(),
         key=["FUSE_ADDMM", "READ_BIAS", "B_TRANSPOSED", "M", "N", "K"],
@@ -841,7 +841,7 @@ if HAS_PPU_TLE:
             mask=mask,
         )
 
-    @libentry(ppu_cached=True)
+    @libentry(cache_binding=True)
     @libtuner(
         configs=_ppu_narrow_columns_configs(),
         key=["FUSE_ADDMM", "READ_BIAS", "B_TRANSPOSED", "M", "N", "K"],
@@ -924,7 +924,7 @@ if HAS_PPU_TLE:
             mask=row_mask & (pid_n < N),
         )
 
-    @libentry(ppu_cached=True)
+    @libentry(cache_binding=True)
     @libtuner(
         configs=_ppu_grouped_row_gemv_configs(),
         key=["FUSE_ADDMM", "READ_BIAS", "B_TRANSPOSED", "M", "N", "K"],
@@ -1008,7 +1008,7 @@ if HAS_PPU_TLE:
             mask=row_mask[:, None] & col_mask[None, :],
         )
 
-    @libentry(ppu_cached=True)
+    @libentry(cache_binding=True)
     @libtuner(
         configs=_ppu_mm_configs(),
         key=["FUSE_ADDMM", "READ_BIAS", "B_TRANSPOSED", "aiu_load_mask", "M", "N", "K"],
@@ -1128,7 +1128,7 @@ if HAS_PPU_TLE:
             READ_BIAS,
         )
 
-    @libentry(ppu_cached=True)
+    @libentry(cache_binding=True)
     @libtuner(
         configs=_ppu_narrow_n_configs(),
         key=["FUSE_ADDMM", "READ_BIAS", "B_TRANSPOSED", "aiu_load_mask", "M", "N", "K"],
@@ -1236,7 +1236,7 @@ if HAS_PPU_TLE:
             READ_BIAS,
         )
 
-    @libentry(ppu_cached=True)
+    @libentry(cache_binding=True)
     @libtuner(
         configs=_ppu_small_m_configs(),
         key=["FUSE_ADDMM", "READ_BIAS", "B_TRANSPOSED", "aiu_load_mask", "M", "N", "K"],
@@ -1347,7 +1347,7 @@ if HAS_PPU_TLE:
             READ_BIAS,
         )
 
-    @libentry(ppu_cached=True)
+    @libentry(cache_binding=True)
     @libtuner(
         configs=_ppu_mid_m_configs(),
         key=[
@@ -1586,7 +1586,7 @@ if HAS_PPU_TLE:
     # PPU global-output atomics compile, but direct FP16 accumulation retained
     # only 20-77% of this workspace path's throughput in the Qwen split-K set.
     # BF16 also rounds every partial sum before the atomic and missed tolerance.
-    @libentry(ppu_cached=True)
+    @libentry(cache_binding=True)
     @libtuner(
         configs=_ppu_split_k_configs(),
         key=["B_TRANSPOSED", "aiu_load_mask", "M", "N", "K"],
@@ -1728,7 +1728,7 @@ if HAS_PPU_TLE:
         else:
             tl.store(workspace_ptrs, acc, mask=mask)
 
-    @libentry(ppu_cached=True)
+    @libentry(cache_binding=True)
     @libtuner(
         configs=_ppu_split_k_reduce_configs(),
         # SPLIT_K is constexpr and changes the reduction loop body.  Keeping
